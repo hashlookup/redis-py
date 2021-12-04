@@ -2083,8 +2083,8 @@ class ScanCommands:
             HASH, LIST, SET, STREAM, STRING, ZSET
             Additionally, Redis modules can expose other types as well.
         """
-        cursor = "0"
-        while cursor != 0:
+        cursor = 0
+        while cursor != '0':
             cursor, data = self.scan(
                 cursor=cursor, match=match, count=count, _type=_type, **kwargs
             )
@@ -2117,8 +2117,8 @@ class ScanCommands:
 
         ``count`` allows for hint the minimum number of returns
         """
-        cursor = "0"
-        while cursor != 0:
+        cursor = 0
+        while cursor != '0':
             cursor, data = self.sscan(name, cursor=cursor, match=match, count=count)
             yield from data
 
@@ -2149,8 +2149,8 @@ class ScanCommands:
 
         ``count`` allows for hint the minimum number of returns
         """
-        cursor = "0"
-        while cursor != 0:
+        cursor = 0
+        while cursor != '0':
             cursor, data = self.hscan(name, cursor=cursor, match=match, count=count)
             yield from data.items()
 
@@ -2186,8 +2186,8 @@ class ScanCommands:
 
         ``score_cast_func`` a callable used to cast the score return value
         """
-        cursor = "0"
-        while cursor != 0:
+        cursor = 0
+        while cursor != '0':
             cursor, data = self.zscan(
                 name,
                 cursor=cursor,

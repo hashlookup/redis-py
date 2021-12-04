@@ -386,19 +386,19 @@ def parse_config_get(response, **options):
 
 def parse_scan(response, **options):
     cursor, r = response
-    return int(cursor), r
+    return str(cursor), r
 
 
 def parse_hscan(response, **options):
     cursor, r = response
-    return int(cursor), r and pairs_to_dict(r) or {}
+    return str(cursor), r and pairs_to_dict(r) or {}
 
 
 def parse_zscan(response, **options):
     score_cast_func = options.get("score_cast_func", float)
     cursor, r = response
     it = iter(r)
-    return int(cursor), list(zip(it, map(score_cast_func, it)))
+    return str(cursor), list(zip(it, map(score_cast_func, it)))
 
 
 def parse_zmscore(response, **options):
