@@ -134,14 +134,14 @@ def test_strappend(client):
     assert "foobar" == client.json().get("jsonkey", Path.rootPath())
 
 
-@pytest.mark.redismod
-def test_debug(client):
-    client.json().set("str", Path.rootPath(), "foo")
-    assert 24 == client.json().debug("MEMORY", "str", Path.rootPath())
-    assert 24 == client.json().debug("MEMORY", "str")
-
-    # technically help is valid
-    assert isinstance(client.json().debug("HELP"), list)
+# @pytest.mark.redismod
+# def test_debug(client):
+#    client.json().set("str", Path.rootPath(), "foo")
+#    assert 24 == client.json().debug("MEMORY", "str", Path.rootPath())
+#    assert 24 == client.json().debug("MEMORY", "str")
+#
+#    # technically help is valid
+#    assert isinstance(client.json().debug("HELP"), list)
 
 
 @pytest.mark.redismod
@@ -969,27 +969,27 @@ def test_toggle_dollar(client):
         client.json().toggle("non_existing_doc", "$..a")
 
 
-@pytest.mark.redismod
-def test_debug_dollar(client):
-
-    jdata, jtypes = load_types_data("a")
-
-    client.json().set("doc1", "$", jdata)
-
-    # Test multi
-    assert client.json().debug("MEMORY", "doc1", "$..a") == [72, 24, 24, 16, 16, 1, 0]
-
-    # Test single
-    assert client.json().debug("MEMORY", "doc1", "$.nested2.a") == [24]
-
-    # Test legacy
-    assert client.json().debug("MEMORY", "doc1", "..a") == 72
-
-    # Test missing path (defaults to root)
-    assert client.json().debug("MEMORY", "doc1") == 72
-
-    # Test missing key
-    assert client.json().debug("MEMORY", "non_existing_doc", "$..a") == []
+# @pytest.mark.redismod
+# def test_debug_dollar(client):
+#
+#    jdata, jtypes = load_types_data("a")
+#
+#    client.json().set("doc1", "$", jdata)
+#
+#    # Test multi
+#    assert client.json().debug("MEMORY", "doc1", "$..a") == [72, 24, 24, 16, 16, 1, 0]
+#
+#    # Test single
+#    assert client.json().debug("MEMORY", "doc1", "$.nested2.a") == [24]
+#
+#    # Test legacy
+#    assert client.json().debug("MEMORY", "doc1", "..a") == 72
+#
+#    # Test missing path (defaults to root)
+#    assert client.json().debug("MEMORY", "doc1") == 72
+#
+#    # Test missing key
+#    assert client.json().debug("MEMORY", "non_existing_doc", "$..a") == []
 
 
 @pytest.mark.redismod
@@ -1392,3 +1392,41 @@ def test_custom_decoder(client):
     assert client.exists("foo") == 0
     assert not isinstance(cj.__encoder__, json.JSONEncoder)
     assert not isinstance(cj.__decoder__, json.JSONDecoder)
+
+
+@pytest.mark.redismod
+def test_set_file(client):
+    import json
+    import tempfile
+
+    obj = {"hello": "world"}
+    jsonfile = tempfile.NamedTemporaryFile(suffix=".json")
+    with open(jsonfile.name, "w+") as fp:
+        fp.write(json.dumps(obj))
+
+    nojsonfile = tempfile.NamedTemporaryFile()
+    nojsonfile.write(b"Hello World")
+
+    assert client.json().set_file("test", Path.rootPath(), jsonfile.name)
+    assert client.json().get("test") == obj
+    with pytest.raises(json.JSONDecodeError):
+        client.json().set_file("test2", Path.rootPath(), nojsonfile.name)
+
+
+@pytest.mark.redismod
+def test_set_path(client):
+    import json
+    import tempfile
+
+    root = tempfile.mkdtemp()
+    sub = tempfile.mkdtemp(dir=root)
+    jsonfile = tempfile.mktemp(suffix=".json", dir=sub)
+    nojsonfile = tempfile.mktemp(dir=root)
+
+    with open(jsonfile, "w+") as fp:
+        fp.write(json.dumps({"hello": "world"}))
+    open(nojsonfile, "a+").write("hello")
+
+    result = {jsonfile: True, nojsonfile: False}
+    assert client.json().set_path(Path.rootPath(), root) == result
+    assert client.json().get(jsonfile.rsplit(".")[0]) == {"hello": "world"}

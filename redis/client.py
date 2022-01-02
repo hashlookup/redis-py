@@ -768,6 +768,7 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
         "STRALGO": parse_stralgo,
         "PUBSUB NUMSUB": parse_pubsub_numsub,
         "RANDOMKEY": lambda r: r and r or None,
+        "RESET": str_if_bytes,
         "SCAN": parse_scan,
         "SCRIPT EXISTS": lambda r: list(map(bool, r)),
         "SCRIPT FLUSH": bool_ok,
@@ -831,6 +832,7 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
 
         There are several ways to specify a database number. The first value
         found will be used:
+
             1. A ``db`` querystring option, e.g. redis://localhost?db=0
             2. If using the redis:// or rediss:// schemes, the path argument
                of the url, e.g. redis://localhost/0
@@ -868,12 +870,16 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
         errors=None,
         decode_responses=False,
         retry_on_timeout=False,
+        retry_on_error=[],
         ssl=False,
         ssl_keyfile=None,
         ssl_certfile=None,
         ssl_cert_reqs="required",
         ssl_ca_certs=None,
+        ssl_ca_path=None,
         ssl_check_hostname=False,
+        ssl_password=None,
+        ssl_validate_ocsp=False,
         max_connections=None,
         single_connection_client=False,
         health_check_interval=0,
@@ -884,8 +890,10 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
     ):
         """
         Initialize a new Redis client.
-        To specify a retry policy, first set `retry_on_timeout` to `True`
-        then set `retry` to a valid `Retry` object
+        To specify a retry policy for specific errors, first set
+        `retry_on_error` to a list of the error/s to retry on, then set
+        `retry` to a valid `Retry` object.
+        To retry on TimeoutError, `retry_on_timeout` can also be set to `True`.
         """
         if not connection_pool:
             if charset is not None:
@@ -902,7 +910,8 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
                     )
                 )
                 encoding_errors = errors
-
+            if retry_on_timeout is True:
+                retry_on_error.append(TimeoutError)
             kwargs = {
                 "db": db,
                 "username": username,
@@ -911,7 +920,7 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
                 "encoding": encoding,
                 "encoding_errors": encoding_errors,
                 "decode_responses": decode_responses,
-                "retry_on_timeout": retry_on_timeout,
+                "retry_on_error": retry_on_error,
                 "retry": copy.deepcopy(retry),
                 "max_connections": max_connections,
                 "health_check_interval": health_check_interval,
@@ -947,6 +956,9 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
                             "ssl_cert_reqs": ssl_cert_reqs,
                             "ssl_ca_certs": ssl_ca_certs,
                             "ssl_check_hostname": ssl_check_hostname,
+                            "ssl_password": ssl_password,
+                            "ssl_ca_path": ssl_ca_path,
+                            "ssl_validate_ocsp": ssl_validate_ocsp,
                         }
                     )
             connection_pool = ConnectionPool(**kwargs)
@@ -1141,11 +1153,14 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
     def _disconnect_raise(self, conn, error):
         """
         Close the connection and raise an exception
-        if retry_on_timeout is not set or the error
-        is not a TimeoutError
+        if retry_on_error is not set or the error
+        is not one of the specified error types
         """
         conn.disconnect()
-        if not (conn.retry_on_timeout and isinstance(error, TimeoutError)):
+        if (
+            conn.retry_on_error is None
+            or isinstance(error, tuple(conn.retry_on_error)) is False
+        ):
             raise error
 
     # COMMAND EXECUTION AND PROTOCOL PARSING
@@ -1276,18 +1291,17 @@ class PubSub:
         self.shard_hint = shard_hint
         self.ignore_subscribe_messages = ignore_subscribe_messages
         self.connection = None
+        self.subscribed_event = threading.Event()
         # we need to know the encoding options for this connection in order
         # to lookup channel and pattern names for callback handlers.
         self.encoder = encoder
         if self.encoder is None:
             self.encoder = self.connection_pool.get_encoder()
+        self.health_check_response_b = self.encoder.encode(self.HEALTH_CHECK_MESSAGE)
         if self.encoder.decode_responses:
             self.health_check_response = ["pong", self.HEALTH_CHECK_MESSAGE]
         else:
-            self.health_check_response = [
-                b"pong",
-                self.encoder.encode(self.HEALTH_CHECK_MESSAGE),
-            ]
+            self.health_check_response = [b"pong", self.health_check_response_b]
         self.reset()
 
     def __enter__(self):
@@ -1312,9 +1326,11 @@ class PubSub:
             self.connection_pool.release(self.connection)
             self.connection = None
         self.channels = {}
+        self.health_check_response_counter = 0
         self.pending_unsubscribe_channels = set()
         self.patterns = {}
         self.pending_unsubscribe_patterns = set()
+        self.subscribed_event.clear()
 
     def close(self):
         self.reset()
@@ -1340,7 +1356,7 @@ class PubSub:
     @property
     def subscribed(self):
         "Indicates if there are subscriptions to any channels or patterns"
-        return bool(self.channels or self.patterns)
+        return self.subscribed_event.is_set()
 
     def execute_command(self, *args):
         "Execute a publish/subscribe command"
@@ -1358,7 +1374,27 @@ class PubSub:
             self.connection.register_connect_callback(self.on_connect)
         connection = self.connection
         kwargs = {"check_health": not self.subscribed}
+        if not self.subscribed:
+            self.clean_health_check_responses()
         self._execute(connection, connection.send_command, *args, **kwargs)
+
+    def clean_health_check_responses(self):
+        """
+        If any health check responses are present, clean them
+        """
+        ttl = 10
+        conn = self.connection
+        while self.health_check_response_counter > 0 and ttl > 0:
+            if self._execute(conn, conn.can_read, timeout=conn.socket_timeout):
+                response = self._execute(conn, conn.read_response)
+                if self.is_health_check_response(response):
+                    self.health_check_response_counter -= 1
+                else:
+                    raise PubSubError(
+                        "A non health check response was cleaned by "
+                        "execute_command: {0}".format(response)
+                    )
+            ttl -= 1
 
     def _disconnect_raise_connect(self, conn, error):
         """
@@ -1399,10 +1435,22 @@ class PubSub:
             return None
         response = self._execute(conn, conn.read_response)
 
-        if conn.health_check_interval and response == self.health_check_response:
+        if self.is_health_check_response(response):
             # ignore the health check message as user might not expect it
+            self.health_check_response_counter -= 1
             return None
         return response
+
+    def is_health_check_response(self, response):
+        """
+        Check if the response is a health check response.
+        If there are no subscriptions redis responds to PING command with a
+        bulk response, instead of a multi-bulk with "pong" and the response.
+        """
+        return response in [
+            self.health_check_response,  # If there was a subscription
+            self.health_check_response_b,  # If there wasn't
+        ]
 
     def check_health(self):
         conn = self.connection
@@ -1414,6 +1462,7 @@ class PubSub:
 
         if conn.health_check_interval and time.time() > conn.next_health_check:
             conn.send_command("PING", self.HEALTH_CHECK_MESSAGE, check_health=False)
+            self.health_check_response_counter += 1
 
     def _normalize_keys(self, data):
         """
@@ -1443,6 +1492,11 @@ class PubSub:
         # for the reconnection.
         new_patterns = self._normalize_keys(new_patterns)
         self.patterns.update(new_patterns)
+        if not self.subscribed:
+            # Set the subscribed_event flag to True
+            self.subscribed_event.set()
+            # Clear the health check counter
+            self.health_check_response_counter = 0
         self.pending_unsubscribe_patterns.difference_update(new_patterns)
         return ret_val
 
@@ -1477,6 +1531,11 @@ class PubSub:
         # for the reconnection.
         new_channels = self._normalize_keys(new_channels)
         self.channels.update(new_channels)
+        if not self.subscribed:
+            # Set the subscribed_event flag to True
+            self.subscribed_event.set()
+            # Clear the health check counter
+            self.health_check_response_counter = 0
         self.pending_unsubscribe_channels.difference_update(new_channels)
         return ret_val
 
@@ -1508,6 +1567,20 @@ class PubSub:
         before returning. Timeout should be specified as a floating point
         number.
         """
+        if not self.subscribed:
+            # Wait for subscription
+            start_time = time.time()
+            if self.subscribed_event.wait(timeout) is True:
+                # The connection was subscribed during the timeout time frame.
+                # The timeout should be adjusted based on the time spent
+                # waiting for the subscription
+                time_spent = time.time() - start_time
+                timeout = max(0.0, timeout - time_spent)
+            else:
+                # The connection isn't subscribed to any channels or patterns,
+                # so no messages are available
+                return None
+
         response = self.parse_response(block=False, timeout=timeout)
         if response:
             return self.handle_message(response, ignore_subscribe_messages)
@@ -1526,6 +1599,8 @@ class PubSub:
         with a message handler, the handler is invoked instead of a parsed
         message being returned.
         """
+        if response is None:
+            return None
         message_type = str_if_bytes(response[0])
         if message_type == "pmessage":
             message = {
@@ -1561,6 +1636,10 @@ class PubSub:
                 if channel in self.pending_unsubscribe_channels:
                     self.pending_unsubscribe_channels.remove(channel)
                     self.channels.pop(channel, None)
+            if not self.channels and not self.patterns:
+                # There are no subscriptions anymore, set subscribed_event flag
+                # to false
+                self.subscribed_event.clear()
 
         if message_type in self.PUBLISH_MESSAGE_TYPES:
             # if there's a message handler, invoke it

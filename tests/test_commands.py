@@ -397,6 +397,28 @@ class TestRedisCommands:
         assert "prefixes" in res
 
     @pytest.mark.onlynoncluster
+    @skip_if_server_version_lt("6.0.0")
+    def test_client_tracking(self, r, r2):
+
+        # simple case
+        assert r.client_tracking_on()
+        assert r.client_tracking_off()
+
+        # id based
+        client_id = r.client_id()
+        assert r.client_tracking_on(client_id)
+        assert r.client_tracking_off(client_id)
+
+        # id exists
+        client_id = r2.client_id()
+        assert r.client_tracking_on(client_id)
+        assert r2.client_tracking_off(client_id)
+
+        # now with some prefixes
+        with pytest.raises(exceptions.DataError):
+            assert r.client_tracking_on(prefix=["foo", "bar", "blee"])
+
+    @pytest.mark.onlynoncluster
     @skip_if_server_version_lt("5.0.0")
     def test_client_unblock(self, r):
         myid = r.client_id()
@@ -557,6 +579,13 @@ class TestRedisCommands:
         with pytest.raises(exceptions.RedisError):
             r.client_pause(timeout="not an integer")
 
+    @skip_if_server_version_lt("6.2.0")
+    def test_client_pause_all(self, r, r2):
+        assert r.client_pause(1, all=False)
+        assert r2.set("foo", "bar")
+        assert r2.get("foo") == b"bar"
+        assert r.get("foo") == b"bar"
+
     @pytest.mark.onlynoncluster
     @skip_if_server_version_lt("6.2.0")
     @skip_if_redis_enterprise()
@@ -640,6 +669,11 @@ class TestRedisCommands:
         lolwut = r.lolwut(5, 6, 7, 8).decode("utf-8")
         assert "Redis ver." in lolwut
 
+    @pytest.mark.onlynoncluster
+    @skip_if_server_version_lt("6.2.0")
+    def test_reset(self, r):
+        assert r.reset() == "RESET"
+
     def test_object(self, r):
         r["a"] = "foo"
         assert isinstance(r.object("refcount", "a"), int)
@@ -660,6 +694,12 @@ class TestRedisCommands:
         assert r.role()[0] == b"master"
         assert isinstance(r.role()[1], int)
         assert isinstance(r.role()[2], list)
+
+    @pytest.mark.onlynoncluster
+    def test_select(self, r):
+        assert r.select(5)
+        assert r.select(2)
+        assert r.select(9)
 
     @pytest.mark.onlynoncluster
     def test_slowlog_get(self, r, slowlog):
@@ -1306,6 +1346,7 @@ class TestRedisCommands:
         assert r["a"] == b"abcdef12345"
 
     @skip_if_server_version_lt("6.0.0")
+    @skip_if_server_version_gte("7.0.0")
     def test_stralgo_lcs(self, r):
         key1 = "{foo}key1"
         key2 = "{foo}key2"
@@ -1338,6 +1379,7 @@ class TestRedisCommands:
         ) == {"len": len(res), "matches": [[4, (4, 7), (5, 8)]]}
 
     @skip_if_server_version_lt("6.0.0")
+    @skip_if_server_version_gte("7.0.0")
     def test_stralgo_negative(self, r):
         with pytest.raises(exceptions.DataError):
             r.stralgo("ISSUB", "value1", "value2")
@@ -4150,6 +4192,18 @@ class TestRedisCommands:
         with pytest.raises(redis.ResponseError):
             assert r.replicaof("NO ONE")
         assert r.replicaof("NO", "ONE")
+
+    @skip_if_server_version_lt("2.8.0")
+    def test_sync(self, r):
+        r2 = redis.Redis(port=6380, decode_responses=False)
+        res = r2.sync()
+        assert b"REDIS" in res
+
+    @skip_if_server_version_lt("2.8.0")
+    def test_psync(self, r):
+        r2 = redis.Redis(port=6380, decode_responses=False)
+        res = r2.psync(r2.client_id(), 1)
+        assert b"FULLRESYNC" in res
 
 
 @pytest.mark.onlynoncluster

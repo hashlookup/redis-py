@@ -479,6 +479,104 @@ class ManagementCommands:
         """
         return self.execute_command("CLIENT ID", **kwargs)
 
+    def client_tracking_on(
+        self,
+        clientid=None,
+        prefix=[],
+        bcast=False,
+        optin=False,
+        optout=False,
+        noloop=False,
+    ):
+        """
+        Turn on the tracking mode.
+        For more information about the options look at client_tracking func.
+
+        See https://redis.io/commands/client-tracking
+        """
+        return self.client_tracking(
+            True, clientid, prefix, bcast, optin, optout, noloop
+        )
+
+    def client_tracking_off(
+        self,
+        clientid=None,
+        prefix=[],
+        bcast=False,
+        optin=False,
+        optout=False,
+        noloop=False,
+    ):
+        """
+        Turn off the tracking mode.
+        For more information about the options look at client_tracking func.
+
+        See https://redis.io/commands/client-tracking
+        """
+        return self.client_tracking(
+            False, clientid, prefix, bcast, optin, optout, noloop
+        )
+
+    def client_tracking(
+        self,
+        on=True,
+        clientid=None,
+        prefix=[],
+        bcast=False,
+        optin=False,
+        optout=False,
+        noloop=False,
+        **kwargs,
+    ):
+        """
+        Enables the tracking feature of the Redis server, that is used
+        for server assisted client side caching.
+
+        ``on`` indicate for tracking on or tracking off. The dafualt is on.
+
+        ``clientid`` send invalidation messages to the connection with
+        the specified ID.
+
+        ``bcast`` enable tracking in broadcasting mode. In this mode
+        invalidation messages are reported for all the prefixes
+        specified, regardless of the keys requested by the connection.
+
+        ``optin``  when broadcasting is NOT active, normally don't track
+        keys in read only commands, unless they are called immediately
+        after a CLIENT CACHING yes command.
+
+        ``optout`` when broadcasting is NOT active, normally track keys in
+        read only commands, unless they are called immediately after a
+        CLIENT CACHING no command.
+
+        ``noloop`` don't send notifications about keys modified by this
+        connection itself.
+
+        ``prefix``  for broadcasting, register a given key prefix, so that
+        notifications will be provided only for keys starting with this string.
+
+        See https://redis.io/commands/client-tracking
+        """
+
+        if len(prefix) != 0 and bcast is False:
+            raise DataError("Prefix can only be used with bcast")
+
+        pieces = ["ON"] if on else ["OFF"]
+        if clientid is not None:
+            pieces.extend(["REDIRECT", clientid])
+        for p in prefix:
+            pieces.extend(["PREFIX", p])
+        if bcast:
+            pieces.append("BCAST")
+        if optin:
+            pieces.append("OPTIN")
+        if optout:
+            pieces.append("OPTOUT")
+        if noloop:
+            pieces.append("NOLOOP")
+
+        return self.execute_command("CLIENT TRACKING", *pieces)
+
     def client_trackinginfo(self, **kwargs):
         """
         Returns the information about the current client connection's
@@ -510,16 +608,28 @@ class ManagementCommands:
             args.append(b"ERROR")
         return self.execute_command(*args, **kwargs)
 
-    def client_pause(self, timeout, **kwargs):
+    def client_pause(self, timeout, all=True, **kwargs):
         """
         Suspend all the Redis clients for the specified amount of time
         :param timeout: milliseconds to pause clients
 
         For more information check https://redis.io/commands/client-pause
+        :param all: If true (default) all client commands are blocked.
+             otherwise, clients are only blocked if they attempt to execute
+             a write command.
+             For the WRITE mode, some commands have special behavior:
+                 EVAL/EVALSHA: Will block client for all scripts.
+                 PUBLISH: Will block client.
+                 PFCOUNT: Will block client.
+                 WAIT: Acknowledgments will be delayed, so this command will
+                 appear blocked.
         """
+        args = ["CLIENT PAUSE", str(timeout)]
         if not isinstance(timeout, int):
             raise DataError("CLIENT PAUSE timeout must be an integer")
-        return self.execute_command("CLIENT PAUSE", str(timeout), **kwargs)
+        if not all:
+            args.append("WRITE")
+        return self.execute_command(*args, **kwargs)
 
     def client_unpause(self, **kwargs):
         """
@@ -637,6 +747,31 @@ class ManagementCommands:
             args.append(b"ASYNC")
         return self.execute_command("FLUSHDB", *args, **kwargs)
 
+    def sync(self):
+        """
+        Initiates a replication stream from the master.
+
+        For more information check https://redis.io/commands/sync
+        """
+        from redis.client import NEVER_DECODE
+
+        options = {}
+        options[NEVER_DECODE] = []
+        return self.execute_command("SYNC", **options)
+
+    def psync(self, replicationid, offset):
+        """
+        Initiates a replication stream from the master.
+        Newer version for `sync`.
+
+        For more information check https://redis.io/commands/sync
+        """
+        from redis.client import NEVER_DECODE
+
+        options = {}
+        options[NEVER_DECODE] = []
+        return self.execute_command("PSYNC", replicationid, offset, **options)
+
     def swapdb(self, first, second, **kwargs):
         """
         Swap two databases
@@ -644,6 +779,13 @@ class ManagementCommands:
         For more information check https://redis.io/commands/swapdb
         """
         return self.execute_command("SWAPDB", first, second, **kwargs)
+
+    def select(self, index, **kwargs):
+        """Select the Redis logical database at index.
+
+        See: https://redis.io/commands/select
+        """
+        return self.execute_command("SELECT", index, **kwargs)
 
     def info(self, section=None, **kwargs):
         """
@@ -681,6 +823,13 @@ class ManagementCommands:
             return self.execute_command("LOLWUT VERSION", *version_numbers, **kwargs)
         else:
             return self.execute_command("LOLWUT", **kwargs)
+
+    def reset(self):
+        """Perform a full reset on the connection's server side contenxt.
+
+        See: https://redis.io/commands/reset
+        """
+        return self.execute_command("RESET")
 
     def migrate(
         self,
@@ -1244,7 +1393,7 @@ class BasicKeyCommands:
         pushing it as the first/last element on the destination list.
         Returns the element being popped and pushed.
 
-        For more information check https://redis.io/commands/lmov
+        For more information check https://redis.io/commands/lmove
         """
         params = [first_list, second_list, src, dest]
         return self.execute_command("LMOVE", *params)

@@ -31,7 +31,7 @@ from redis.exceptions import (
     TimeoutError,
 )
 from redis.retry import Retry
-from redis.utils import HIREDIS_AVAILABLE, str_if_bytes
+from redis.utils import CRYPTOGRAPHY_AVAILABLE, HIREDIS_AVAILABLE, str_if_bytes
 
 try:
     import ssl
@@ -382,7 +382,7 @@ class HiredisParser(BaseParser):
         except Exception:
             pass
 
-    def on_connect(self, connection):
+    def on_connect(self, connection, **kwargs):
         self._sock = connection._sock
         self._socket_timeout = connection.socket_timeout
         kwargs = {
@@ -513,6 +513,7 @@ class Connection:
         socket_keepalive_options=None,
         socket_type=0,
         retry_on_timeout=False,
+        retry_on_error=[],
         encoding="utf-8",
         encoding_errors="strict",
         decode_responses=False,
@@ -526,8 +527,10 @@ class Connection:
     ):
         """
         Initialize a new Connection.
-        To specify a retry policy, first set `retry_on_timeout` to `True`
-        then set `retry` to a valid `Retry` object
+        To specify a retry policy for specific errors, first set
+        `retry_on_error` to a list of the error/s to retry on, then set
+        `retry` to a valid `Retry` object.
+        To retry on TimeoutError, `retry_on_timeout` can also be set to `True`.
         """
         self.pid = os.getpid()
         self.host = host
@@ -543,17 +546,23 @@ class Connection:
         self.socket_type = socket_type
         self.retry_on_timeout = retry_on_timeout
         if retry_on_timeout:
+            # Add TimeoutError to the errors list to retry on
+            retry_on_error.append(TimeoutError)
+        self.retry_on_error = retry_on_error
+        if retry_on_error:
             if retry is None:
                 self.retry = Retry(NoBackoff(), 1)
             else:
                 # deep-copy the Retry object as it is mutable
                 self.retry = copy.deepcopy(retry)
+            # Update the retry's supported errors with the specified errors
+            self.retry.update_supported_erros(retry_on_error)
         else:
             self.retry = Retry(NoBackoff(), 0)
         self.health_check_interval = health_check_interval
         self.next_health_check = 0
-        self.encoder = Encoder(encoding, encoding_errors, decode_responses)
         self.redis_connect_func = redis_connect_func
+        self.encoder = Encoder(encoding, encoding_errors, decode_responses)
         self._sock = None
         self._socket_read_size = socket_read_size
         self.set_parser(parser_class)
@@ -717,9 +726,14 @@ class Connection:
         self._parser.on_disconnect()
         if self._sock is None:
             return
-        try:
-            if os.getpid() == self.pid:
+
+        if os.getpid() == self.pid:
+            try:
                 self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        try:
             self._sock.close()
         except OSError:
             pass
@@ -879,6 +893,11 @@ class Connection:
 
 
 class SSLConnection(Connection):
+    """Manages SSL connections to and from the Redis server(s).
+    This class extends the Connection class, adding SSL functionality, and making
+    use of ssl.SSLContext (https://docs.python.org/3/library/ssl.html#ssl.SSLContext)
+    """  # noqa
+
     def __init__(
         self,
         ssl_keyfile=None,
@@ -886,8 +905,25 @@ class SSLConnection(Connection):
         ssl_cert_reqs="required",
         ssl_ca_certs=None,
         ssl_check_hostname=False,
+        ssl_ca_path=None,
+        ssl_password=None,
+        ssl_validate_ocsp=False,
         **kwargs,
     ):
+        """Constructor
+
+        Args:
+            ssl_keyfile: Path to an ssl private key. Defaults to None.
+            ssl_certfile: Path to an ssl certificate. Defaults to None.
+            ssl_cert_reqs: The string value for the SSLContext.verify_mode (none, optional, required). Defaults to "required".
+            ssl_ca_certs: The path to a file of concatenated CA certificates in PEM format. Defaults to None.
+            ssl_check_hostname: If set, match the hostname during the SSL handshake. Defaults to False.
+            ssl_ca_path: The path to a directory containing several CA certificates in PEM format. Defaults to None.
+            ssl_password: Password for unlocking an encrypted private key. Defaults to None.
+
+        Raises:
+            RedisError
+        """  # noqa
         if not ssl_available:
             raise RedisError("Python wasn't built with SSL support")
 
@@ -910,7 +946,10 @@ class SSLConnection(Connection):
             ssl_cert_reqs = CERT_REQS[ssl_cert_reqs]
         self.cert_reqs = ssl_cert_reqs
         self.ca_certs = ssl_ca_certs
+        self.ca_path = ssl_ca_path
         self.check_hostname = ssl_check_hostname
+        self.certificate_password = ssl_password
+        self.ssl_validate_ocsp = ssl_validate_ocsp
 
     def _connect(self):
         "Wrap the socket with SSL support"
@@ -918,11 +957,26 @@ class SSLConnection(Connection):
         context = ssl.create_default_context()
         context.check_hostname = self.check_hostname
         context.verify_mode = self.cert_reqs
-        if self.certfile and self.keyfile:
-            context.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
-        if self.ca_certs:
-            context.load_verify_locations(self.ca_certs)
-        return context.wrap_socket(sock, server_hostname=self.host)
+        if self.certfile or self.keyfile:
+            context.load_cert_chain(
+                certfile=self.certfile,
+                keyfile=self.keyfile,
+                password=self.certificate_password,
+            )
+        if self.ca_certs is not None or self.ca_path is not None:
+            context.load_verify_locations(cafile=self.ca_certs, capath=self.ca_path)
+        sslsock = context.wrap_socket(sock, server_hostname=self.host)
+        if self.ssl_validate_ocsp is True and CRYPTOGRAPHY_AVAILABLE is False:
+            raise RedisError("cryptography is not installed.")
+        elif self.ssl_validate_ocsp is True and CRYPTOGRAPHY_AVAILABLE:
+            from .ocsp import OCSPVerifier
+
+            o = OCSPVerifier(sslsock, self.host, self.port, self.ca_certs)
+            if o.is_valid():
+                return sslsock
+            else:
+                raise ConnectionError("ocsp validation error")
+        return sslsock
 
 
 class UnixDomainSocketConnection(Connection):
@@ -937,16 +991,20 @@ class UnixDomainSocketConnection(Connection):
         encoding_errors="strict",
         decode_responses=False,
         retry_on_timeout=False,
+        retry_on_error=[],
         parser_class=DefaultParser,
         socket_read_size=65536,
         health_check_interval=0,
         client_name=None,
         retry=None,
+        redis_connect_func=None,
     ):
         """
         Initialize a new UnixDomainSocketConnection.
-        To specify a retry policy, first set `retry_on_timeout` to `True`
-        then set `retry` to a valid `Retry` object
+        To specify a retry policy for specific errors, first set
+        `retry_on_error` to a list of the error/s to retry on, then set
+        `retry` to a valid `Retry` object.
+        To retry on TimeoutError, `retry_on_timeout` can also be set to `True`.
         """
         self.pid = os.getpid()
         self.path = path
@@ -957,15 +1015,22 @@ class UnixDomainSocketConnection(Connection):
         self.socket_timeout = socket_timeout
         self.retry_on_timeout = retry_on_timeout
         if retry_on_timeout:
+            # Add TimeoutError to the errors list to retry on
+            retry_on_error.append(TimeoutError)
+        self.retry_on_error = retry_on_error
+        if self.retry_on_error:
             if retry is None:
                 self.retry = Retry(NoBackoff(), 1)
             else:
                 # deep-copy the Retry object as it is mutable
                 self.retry = copy.deepcopy(retry)
+            # Update the retry's supported errors with the specified errors
+            self.retry.update_supported_erros(retry_on_error)
         else:
             self.retry = Retry(NoBackoff(), 0)
         self.health_check_interval = health_check_interval
         self.next_health_check = 0
+        self.redis_connect_func = redis_connect_func
         self.encoder = Encoder(encoding, encoding_errors, decode_responses)
         self._sock = None
         self._socket_read_size = socket_read_size
@@ -1018,6 +1083,7 @@ URL_QUERY_ARGUMENT_PARSERS = {
     "socket_connect_timeout": float,
     "socket_keepalive": to_bool,
     "retry_on_timeout": to_bool,
+    "retry_on_error": list,
     "max_connections": int,
     "health_check_interval": int,
     "ssl_check_hostname": to_bool,
@@ -1079,11 +1145,11 @@ def parse_url(url):
 class ConnectionPool:
     """
     Create a connection pool. ``If max_connections`` is set, then this
-    object raises :py:class:`~redis.ConnectionError` when the pool's
+    object raises :py:class:`~redis.exceptions.ConnectionError` when the pool's
     limit is reached.
 
     By default, TCP connections are created unless ``connection_class``
-    is specified. Use :py:class:`~redis.UnixDomainSocketConnection` for
+    is specified. Use class:`.UnixDomainSocketConnection` for
     unix sockets.
 
     Any additional keyword arguments are passed to the constructor of
@@ -1115,6 +1181,7 @@ class ConnectionPool:
 
         There are several ways to specify a database number. The first value
         found will be used:
+
             1. A ``db`` querystring option, e.g. redis://localhost?db=0
             2. If using the redis:// or rediss:// schemes, the path argument
                of the url, e.g. redis://localhost/0

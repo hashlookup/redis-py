@@ -14,8 +14,10 @@ from redis.retry import Retry
 
 REDIS_INFO = {}
 default_redis_url = "redis://localhost:6379/9"
-
 default_redismod_url = "redis://localhost:36379"
+
+# default ssl client ignores verification for the purpose of testing
+default_redis_ssl_url = "rediss://localhost:6666"
 default_cluster_nodes = 6
 
 
@@ -34,6 +36,13 @@ def pytest_addoption(parser):
         help="Connection string to redis server"
         " with loaded modules,"
         " defaults to `%(default)s`",
+    )
+
+    parser.addoption(
+        "--redis-ssl-url",
+        default=default_redis_ssl_url,
+        action="store",
+        help="Redis SSL connection string," " defaults to `%(default)s`",
     )
 
     parser.addoption(
@@ -161,6 +170,24 @@ def skip_ifnot_redis_enterprise():
     return pytest.mark.skipif(check, reason="Not running in redis enterprise")
 
 
+def skip_if_nocryptography():
+    try:
+        import cryptography  # noqa
+
+        return pytest.mark.skipif(False, reason="Cryptography dependency found")
+    except ImportError:
+        return pytest.mark.skipif(True, reason="No cryptography dependency")
+
+
+def skip_if_cryptography():
+    try:
+        import cryptography  # noqa
+
+        return pytest.mark.skipif(True, reason="Cryptography dependency found")
+    except ImportError:
+        return pytest.mark.skipif(False, reason="No cryptography dependency")
+
+
 def _get_client(
     cls, request, single_connection_client=True, flushdb=True, from_url=None, **kwargs
 ):
@@ -245,6 +272,12 @@ def r_timeout(request):
 def r2(request):
     "A second client for tests that need multiple"
     with _get_client(redis.Redis, request) as client:
+        yield client
+
+
+@pytest.fixture()
+def sslclient(request):
+    with _get_client(redis.Redis, request, ssl=True) as client:
         yield client
 
 

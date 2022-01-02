@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 from setuptools import find_packages, setup
 
-import redis
-
 setup(
     name="redis",
     description="Python client for Redis database and key-value store",
@@ -10,7 +8,7 @@ setup(
     long_description_content_type="text/markdown",
     keywords=["Redis", "key-value store", "database"],
     license="MIT",
-    version=redis.__version__,
+    version="4.1.0",
     packages=find_packages(
         include=[
             "redis",
@@ -26,12 +24,10 @@ setup(
     author="Redis Inc.",
     author_email="oss@redis.com",
     python_requires=">=3.6",
-    setup_requires=[
-        "packaging>=21.3",
-    ],
     install_requires=[
         "deprecated>=1.2.3",
         "packaging>=21.3",
+        'importlib-metadata >= 1.0; python_version < "3.8"',
     ],
     classifiers=[
         "Development Status :: 5 - Production/Stable",
@@ -52,5 +48,6 @@ setup(
     ],
     extras_require={
         "hiredis": ["hiredis>=1.0.0"],
+        "cryptography": ["cryptography>=36.0.1", "requests>=2.26.0"],
     },
 )
