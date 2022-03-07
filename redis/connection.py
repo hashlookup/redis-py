@@ -463,10 +463,17 @@ class HiredisParser(BaseParser):
             self._next_response = False
             return response
 
-        response = self._reader.gets()
+        if disable_decoding:
+            response = self._reader.gets(False)
+        else:
+            response = self._reader.gets()
+
         while response is False:
             self.read_from_socket()
-            response = self._reader.gets()
+            if disable_decoding:
+                response = self._reader.gets(False)
+            else:
+                response = self._reader.gets()
         # if an older version of hiredis is installed, we need to attempt
         # to convert ResponseErrors to their appropriate types.
         if not HIREDIS_SUPPORTS_CALLABLE_ERRORS:
@@ -1570,7 +1577,7 @@ class BlockingConnectionPool(ConnectionPool):
             try:
                 if connection.can_read():
                     raise ConnectionError("Connection has data")
-            except ConnectionError:
+            except (ConnectionError, OSError):
                 connection.disconnect()
                 connection.connect()
                 if connection.can_read():
