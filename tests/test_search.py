@@ -10,19 +10,21 @@ import redis
 import redis.commands.search
 import redis.commands.search.aggregation as aggregations
 import redis.commands.search.reducers as reducers
-from redis import Redis
 from redis.commands.json.path import Path
 from redis.commands.search import Search
-from redis.commands.search.field import GeoField, NumericField, TagField, TextField
+from redis.commands.search.field import (
+    GeoField,
+    NumericField,
+    TagField,
+    TextField,
+    VectorField,
+)
 from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 from redis.commands.search.query import GeoFilter, NumericFilter, Query
 from redis.commands.search.result import Result
 from redis.commands.search.suggestion import Suggestion
 
-from .conftest import default_redismod_url, skip_ifmodversion_lt
-
-pytestmark = pytest.mark.onlynoncluster
-
+from .conftest import skip_ifmodversion_lt
 
 WILL_PLAY_TEXT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "testdata", "will_play_text.csv.bz2")
@@ -36,7 +38,7 @@ TITLES_CSV = os.path.abspath(
 def waitForIndex(env, idx, timeout=None):
     delay = 0.1
     while True:
-        res = env.execute_command("ft.info", idx)
+        res = env.execute_command("FT.INFO", idx)
         try:
             res.index("indexing")
         except ValueError:
@@ -52,13 +54,12 @@ def waitForIndex(env, idx, timeout=None):
                 break
 
 
-def getClient():
+def getClient(client):
     """
     Gets a client client attached to an index name which is ready to be
     created
     """
-    rc = Redis.from_url(default_redismod_url, decode_responses=True)
-    return rc
+    return client
 
 
 def createIndex(client, num_docs=100, definition=None):
@@ -94,12 +95,6 @@ def createIndex(client, num_docs=100, definition=None):
     for key, doc in chapters.items():
         indexer.add_document(key, **doc)
     indexer.commit()
-
-
-# override the default module client, search requires both db=0, and text
-@pytest.fixture
-def modclient():
-    return Redis.from_url(default_redismod_url, db=0, decode_responses=True)
 
 
 @pytest.fixture
@@ -234,6 +229,7 @@ def test_payloads(client):
 
 
 @pytest.mark.redismod
+@pytest.mark.onlynoncluster
 def test_scores(client):
     client.ft().create_index((TextField("txt"),))
 
@@ -356,14 +352,14 @@ def test_sort_by(client):
 
 @pytest.mark.redismod
 @skip_ifmodversion_lt("2.0.0", "search")
-def test_drop_index():
+def test_drop_index(client):
     """
     Ensure the index gets dropped by data remains by default
     """
     for x in range(20):
         for keep_docs in [[True, {}], [False, {"name": "haveit"}]]:
             idx = "HaveIt"
-            index = getClient()
+            index = getClient(client)
             index.hset("index:haveit", mapping={"name": "haveit"})
             idef = IndexDefinition(prefix=["index:"])
             index.ft(idx).create_index((TextField("name"),), definition=idef)
@@ -574,9 +570,9 @@ def test_summarize(client):
 
 @pytest.mark.redismod
 @skip_ifmodversion_lt("2.0.0", "search")
-def test_alias():
-    index1 = getClient()
-    index2 = getClient()
+def test_alias(client):
+    index1 = getClient(client)
+    index2 = getClient(client)
 
     def1 = IndexDefinition(prefix=["index1:"])
     def2 = IndexDefinition(prefix=["index2:"])
@@ -594,7 +590,7 @@ def test_alias():
 
     # create alias and check for results
     ftindex1.aliasadd("spaceballs")
-    alias_client = getClient().ft("spaceballs")
+    alias_client = getClient(client).ft("spaceballs")
     res = alias_client.search("*").docs[0]
     assert "index1:lonestar" == res.id
 
@@ -604,7 +600,7 @@ def test_alias():
 
     # update alias and ensure new results
     ftindex2.aliasupdate("spaceballs")
-    alias_client2 = getClient().ft("spaceballs")
+    alias_client2 = getClient(client).ft("spaceballs")
 
     res = alias_client2.search("*").docs[0]
     assert "index2:yogurt" == res.id
@@ -615,21 +611,21 @@ def test_alias():
 
 
 @pytest.mark.redismod
-def test_alias_basic():
+def test_alias_basic(client):
     # Creating a client with one index
-    getClient().flushdb()
-    index1 = getClient().ft("testAlias")
+    getClient(client).flushdb()
+    index1 = getClient(client).ft("testAlias")
 
     index1.create_index((TextField("txt"),))
     index1.add_document("doc1", txt="text goes here")
 
-    index2 = getClient().ft("testAlias2")
+    index2 = getClient(client).ft("testAlias2")
     index2.create_index((TextField("txt"),))
     index2.add_document("doc2", txt="text goes here")
 
     # add the actual alias and check
     index1.aliasadd("myalias")
-    alias_client = getClient().ft("myalias")
+    alias_client = getClient(client).ft("myalias")
     res = sorted(alias_client.search("*").docs, key=lambda x: x.id)
     assert "doc1" == res[0].id
 
@@ -639,7 +635,7 @@ def test_alias_basic():
 
     # update the alias and ensure we get doc2
     index2.aliasupdate("myalias")
-    alias_client2 = getClient().ft("myalias")
+    alias_client2 = getClient(client).ft("myalias")
     res = sorted(alias_client2.search("*").docs, key=lambda x: x.id)
     assert "doc1" == res[0].id
 
@@ -790,6 +786,7 @@ def test_phonetic_matcher(client):
 
 
 @pytest.mark.redismod
+@pytest.mark.onlynoncluster
 def test_scorer(client):
     client.ft().create_index((TextField("description"),))
 
@@ -842,6 +839,7 @@ def test_get(client):
 
 
 @pytest.mark.redismod
+@pytest.mark.onlynoncluster
 @skip_ifmodversion_lt("2.2.0", "search")
 def test_config(client):
     assert client.ft().config_set("TIMEOUT", "100")
@@ -854,6 +852,7 @@ def test_config(client):
 
 
 @pytest.mark.redismod
+@pytest.mark.onlynoncluster
 def test_aggregations_groupby(client):
     # Creating the index definition and schema
     client.ft().create_index(
@@ -1085,8 +1084,8 @@ def test_aggregations_apply(client):
         CreatedDateTimeUTC="@CreatedDateTimeUTC * 10"
     )
     res = client.ft().aggregate(req)
-    assert res.rows[0] == ["CreatedDateTimeUTC", "6373878785249699840"]
-    assert res.rows[1] == ["CreatedDateTimeUTC", "6373878758592700416"]
+    res_set = set([res.rows[0][1], res.rows[1][1]])
+    assert res_set == set(["6373878785249699840", "6373878758592700416"])
 
 
 @pytest.mark.redismod
@@ -1158,6 +1157,7 @@ def test_index_definition(client):
 
 
 @pytest.mark.redismod
+@pytest.mark.onlynoncluster
 def testExpire(client):
     client.ft().create_index((TextField("txt", sortable=True),), temporary=4)
     ttl = client.execute_command("ft.debug", "TTL", "idx")
@@ -1477,6 +1477,7 @@ def test_json_with_jsonpath(client):
 
 
 @pytest.mark.redismod
+@pytest.mark.onlynoncluster
 def test_profile(client):
     client.ft().create_index((TextField("t"),))
     client.ft().client.hset("1", "t", "hello")
@@ -1505,6 +1506,7 @@ def test_profile(client):
 
 
 @pytest.mark.redismod
+@pytest.mark.onlynoncluster
 def test_profile_limited(client):
     client.ft().create_index((TextField("t"),))
     client.ft().client.hset("1", "t", "hello")
@@ -1524,6 +1526,40 @@ def test_profile_limited(client):
     )
     assert det["Iterators profile"]["Type"] == "INTERSECT"
     assert len(res.docs) == 3  # check also the search result
+
+
+@pytest.mark.redismod
+def test_vector_field(modclient):
+    modclient.flushdb()
+    modclient.ft().create_index(
+        (
+            VectorField(
+                "v", "HNSW", {"TYPE": "FLOAT32", "DIM": 2, "DISTANCE_METRIC": "L2"}
+            ),
+        )
+    )
+    modclient.hset("a", "v", "aaaaaaaa")
+    modclient.hset("b", "v", "aaaabaaa")
+    modclient.hset("c", "v", "aaaaabaa")
+
+    q = Query("*=>[KNN 2 @v $vec]").return_field("__v_score").sort_by("__v_score", True)
+    res = modclient.ft().search(q, query_params={"vec": "aaaaaaaa"})
+
+    assert "a" == res.docs[0].id
+    assert "0" == res.docs[0].__getattribute__("__v_score")
+
+
+@pytest.mark.redismod
+def test_vector_field_error(modclient):
+    modclient.flushdb()
+
+    # sortable tag
+    with pytest.raises(Exception):
+        modclient.ft().create_index((VectorField("v", "HNSW", {}, sortable=True),))
+
+    # not supported algorithm
+    with pytest.raises(Exception):
+        modclient.ft().create_index((VectorField("v", "SORT", {}),))
 
 
 @pytest.mark.redismod
@@ -1577,3 +1613,21 @@ def test_geo_params(modclient):
     assert "doc1" == res.docs[0].id
     assert "doc2" == res.docs[1].id
     assert "doc3" == res.docs[2].id
+
+
+@pytest.mark.redismod
+def test_search_commands_in_pipeline(client):
+    p = client.ft().pipeline()
+    p.create_index((TextField("txt"),))
+    p.add_document("doc1", payload="foo baz", txt="foo bar")
+    p.add_document("doc2", txt="foo bar")
+    q = Query("foo bar").with_payloads()
+    p.search(q)
+    res = p.execute()
+    assert res[:3] == ["OK", "OK", "OK"]
+    assert 2 == res[3][0]
+    assert "doc1" == res[3][1]
+    assert "doc2" == res[3][4]
+    assert "foo baz" == res[3][2]
+    assert res[3][5] is None
+    assert res[3][3] == res[3][6] == ["txt", "foo bar"]
