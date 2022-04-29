@@ -24,7 +24,7 @@ from redis.commands.search.query import GeoFilter, NumericFilter, Query
 from redis.commands.search.result import Result
 from redis.commands.search.suggestion import Suggestion
 
-from .conftest import skip_ifmodversion_lt
+from .conftest import skip_if_redis_enterprise, skip_ifmodversion_lt
 
 WILL_PLAY_TEXT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "testdata", "will_play_text.csv.bz2")
@@ -107,7 +107,7 @@ def client(modclient):
 def test_client(client):
     num_docs = 500
     createIndex(client.ft(), num_docs=num_docs)
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
     # verify info
     info = client.ft().info()
     for k in [
@@ -252,7 +252,7 @@ def test_replace(client):
 
     client.ft().add_document("doc1", txt="foo bar")
     client.ft().add_document("doc2", txt="foo bar")
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
 
     res = client.ft().search("foo bar")
     assert 2 == res.total
@@ -272,7 +272,7 @@ def test_stopwords(client):
     client.ft().create_index((TextField("txt"),), stopwords=["foo", "bar", "baz"])
     client.ft().add_document("doc1", txt="foo bar")
     client.ft().add_document("doc2", txt="hello world")
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
 
     q1 = Query("foo bar").no_content()
     q2 = Query("foo bar hello world").no_content()
@@ -287,7 +287,7 @@ def test_filters(client):
     client.ft().add_document("doc1", txt="foo bar", num=3.141, loc="-0.441,51.458")
     client.ft().add_document("doc2", txt="foo baz", num=2, loc="-0.1,51.2")
 
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
     # Test numerical filter
     q1 = Query("foo").add_filter(NumericFilter("num", 0, 2)).no_content()
     q2 = (
@@ -389,6 +389,7 @@ def test_example(client):
 
 
 @pytest.mark.redismod
+@skip_if_redis_enterprise()
 def test_auto_complete(client):
     n = 0
     with open(TITLES_CSV) as f:
@@ -455,7 +456,7 @@ def test_no_index(client):
     client.ft().add_document(
         "doc2", field="aab", text="2", numeric="2", geo="2,2", tag="2"
     )
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
 
     res = client.ft().search(Query("@text:aa*"))
     assert 0 == res.total
@@ -497,7 +498,7 @@ def test_partial(client):
     client.ft().add_document("doc2", f1="f1_val", f2="f2_val")
     client.ft().add_document("doc1", f3="f3_val", partial=True)
     client.ft().add_document("doc2", f3="f3_val", replace=True)
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
 
     # Search for f3 value. All documents should have it
     res = client.ft().search("@f3:f3_val")
@@ -515,7 +516,7 @@ def test_no_create(client):
     client.ft().add_document("doc2", f1="f1_val", f2="f2_val")
     client.ft().add_document("doc1", f3="f3_val", no_create=True)
     client.ft().add_document("doc2", f3="f3_val", no_create=True, partial=True)
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
 
     # Search for f3 value. All documents should have it
     res = client.ft().search("@f3:f3_val")
@@ -545,7 +546,7 @@ def test_explaincli(client):
 @pytest.mark.redismod
 def test_summarize(client):
     createIndex(client.ft())
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
 
     q = Query("king henry").paging(0, 1)
     q.highlight(fields=("play", "txt"), tags=("<b>", "</b>"))
@@ -653,7 +654,7 @@ def test_tags(client):
 
     client.ft().add_document("doc1", txt="fooz barz", tags=tags)
     client.ft().add_document("doc2", txt="noodles", tags=tags2)
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
 
     q = Query("@tags:{foo}")
     res = client.ft().search(q)
@@ -713,7 +714,7 @@ def test_spell_check(client):
 
     client.ft().add_document("doc1", f1="some valid content", f2="this is sample text")
     client.ft().add_document("doc2", f1="very important", f2="lorem ipsum")
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
 
     # test spellcheck
     res = client.ft().spellcheck("impornant")
@@ -948,7 +949,8 @@ def test_aggregations_groupby(client):
 
     res = client.ft().aggregate(req).rows[0]
     assert res[1] == "redis"
-    assert res[3] == "7"  # (10+3+8)/3
+    index = res.index("__generated_aliasavgrandom_num")
+    assert res[index + 1] == "7"  # (10+3+8)/3
 
     req = aggregations.AggregateRequest("redis").group_by(
         "@parent",
@@ -1158,6 +1160,7 @@ def test_index_definition(client):
 
 @pytest.mark.redismod
 @pytest.mark.onlynoncluster
+@skip_if_redis_enterprise()
 def testExpire(client):
     client.ft().create_index((TextField("txt", sortable=True),), temporary=4)
     ttl = client.execute_command("ft.debug", "TTL", "idx")
@@ -1302,6 +1305,31 @@ def test_fields_as_name(client):
 
 
 @pytest.mark.redismod
+def test_casesensitive(client):
+    # create index
+    SCHEMA = (TagField("t", case_sensitive=False),)
+    client.ft().create_index(SCHEMA)
+    client.ft().client.hset("1", "t", "HELLO")
+    client.ft().client.hset("2", "t", "hello")
+
+    res = client.ft().search("@t:{HELLO}").docs
+
+    assert 2 == len(res)
+    assert "1" == res[0].id
+    assert "2" == res[1].id
+
+    # create casesensitive index
+    client.ft().dropindex()
+    SCHEMA = (TagField("t", case_sensitive=True),)
+    client.ft().create_index(SCHEMA)
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
+
+    res = client.ft().search("@t:{HELLO}").docs
+    assert 1 == len(res)
+    assert "1" == res[0].id
+
+
+@pytest.mark.redismod
 @skip_ifmodversion_lt("2.2.0", "search")
 def test_search_return_fields(client):
     res = client.json().set(
@@ -1318,7 +1346,7 @@ def test_search_return_fields(client):
         NumericField("$.flt"),
     )
     client.ft().create_index(SCHEMA, definition=definition)
-    waitForIndex(client, "idx")
+    waitForIndex(client, getattr(client.ft(), "index_name", "idx"))
 
     total = client.ft().search(Query("*").return_field("$.t", as_field="txt")).docs
     assert 1 == len(total)
@@ -1478,6 +1506,7 @@ def test_json_with_jsonpath(client):
 
 @pytest.mark.redismod
 @pytest.mark.onlynoncluster
+@skip_if_redis_enterprise()
 def test_profile(client):
     client.ft().create_index((TextField("t"),))
     client.ft().client.hset("1", "t", "hello")
@@ -1529,6 +1558,7 @@ def test_profile_limited(client):
 
 
 @pytest.mark.redismod
+@skip_ifmodversion_lt("2.4.3", "search")
 def test_vector_field(modclient):
     modclient.flushdb()
     modclient.ft().create_index(
@@ -1542,7 +1572,8 @@ def test_vector_field(modclient):
     modclient.hset("b", "v", "aaaabaaa")
     modclient.hset("c", "v", "aaaaabaa")
 
-    q = Query("*=>[KNN 2 @v $vec]").return_field("__v_score").sort_by("__v_score", True)
+    query = "*=>[KNN 2 @v $vec]"
+    q = Query(query).return_field("__v_score").sort_by("__v_score", True).dialect(2)
     res = modclient.ft().search(q, query_params={"vec": "aaaaaaaa"})
 
     assert "a" == res.docs[0].id
@@ -1550,6 +1581,7 @@ def test_vector_field(modclient):
 
 
 @pytest.mark.redismod
+@skip_ifmodversion_lt("2.4.3", "search")
 def test_vector_field_error(modclient):
     modclient.flushdb()
 
@@ -1563,6 +1595,7 @@ def test_vector_field_error(modclient):
 
 
 @pytest.mark.redismod
+@skip_ifmodversion_lt("2.4.3", "search")
 def test_text_params(modclient):
     modclient.flushdb()
     modclient.ft().create_index((TextField("name"),))
@@ -1572,7 +1605,7 @@ def test_text_params(modclient):
     modclient.ft().add_document("doc3", name="Carol")
 
     params_dict = {"name1": "Alice", "name2": "Bob"}
-    q = Query("@name:($name1 | $name2 )")
+    q = Query("@name:($name1 | $name2 )").dialect(2)
     res = modclient.ft().search(q, query_params=params_dict)
     assert 2 == res.total
     assert "doc1" == res.docs[0].id
@@ -1580,6 +1613,7 @@ def test_text_params(modclient):
 
 
 @pytest.mark.redismod
+@skip_ifmodversion_lt("2.4.3", "search")
 def test_numeric_params(modclient):
     modclient.flushdb()
     modclient.ft().create_index((NumericField("numval"),))
@@ -1589,7 +1623,7 @@ def test_numeric_params(modclient):
     modclient.ft().add_document("doc3", numval=103)
 
     params_dict = {"min": 101, "max": 102}
-    q = Query("@numval:[$min $max]")
+    q = Query("@numval:[$min $max]").dialect(2)
     res = modclient.ft().search(q, query_params=params_dict)
 
     assert 2 == res.total
@@ -1598,6 +1632,7 @@ def test_numeric_params(modclient):
 
 
 @pytest.mark.redismod
+@skip_ifmodversion_lt("2.4.3", "search")
 def test_geo_params(modclient):
 
     modclient.flushdb()
@@ -1607,7 +1642,7 @@ def test_geo_params(modclient):
     modclient.ft().add_document("doc3", g="29.68746, 34.94882")
 
     params_dict = {"lat": "34.95126", "lon": "29.69465", "radius": 1000, "units": "km"}
-    q = Query("@g:[$lon $lat $radius $units]")
+    q = Query("@g:[$lon $lat $radius $units]").dialect(2)
     res = modclient.ft().search(q, query_params=params_dict)
     assert 3 == res.total
     assert "doc1" == res.docs[0].id
@@ -1616,6 +1651,7 @@ def test_geo_params(modclient):
 
 
 @pytest.mark.redismod
+@skip_if_redis_enterprise()
 def test_search_commands_in_pipeline(client):
     p = client.ft().pipeline()
     p.create_index((TextField("txt"),))
@@ -1631,3 +1667,48 @@ def test_search_commands_in_pipeline(client):
     assert "foo baz" == res[3][2]
     assert res[3][5] is None
     assert res[3][3] == res[3][6] == ["txt", "foo bar"]
+
+
+@pytest.mark.redismod
+@pytest.mark.onlynoncluster
+@skip_ifmodversion_lt("2.4.3", "search")
+def test_dialect_config(modclient: redis.Redis):
+    assert modclient.ft().config_get("DEFAULT_DIALECT") == {"DEFAULT_DIALECT": "1"}
+    assert modclient.ft().config_set("DEFAULT_DIALECT", 2)
+    assert modclient.ft().config_get("DEFAULT_DIALECT") == {"DEFAULT_DIALECT": "2"}
+    with pytest.raises(redis.ResponseError):
+        modclient.ft().config_set("DEFAULT_DIALECT", 0)
+
+
+@pytest.mark.redismod
+@skip_ifmodversion_lt("2.4.3", "search")
+def test_dialect(modclient: redis.Redis):
+    modclient.ft().create_index(
+        (
+            TagField("title"),
+            TextField("t1"),
+            TextField("t2"),
+            NumericField("num"),
+            VectorField(
+                "v", "HNSW", {"TYPE": "FLOAT32", "DIM": 1, "DISTANCE_METRIC": "COSINE"}
+            ),
+        )
+    )
+    modclient.hset("h", "t1", "hello")
+    with pytest.raises(redis.ResponseError) as err:
+        modclient.ft().explain(Query("(*)").dialect(1))
+    assert "Syntax error" in str(err)
+    assert "WILDCARD" in modclient.ft().explain(Query("(*)").dialect(2))
+
+    with pytest.raises(redis.ResponseError) as err:
+        modclient.ft().explain(Query("$hello").dialect(1))
+    assert "Syntax error" in str(err)
+    q = Query("$hello").dialect(2)
+    expected = "UNION {\n  hello\n  +hello(expanded)\n}\n"
+    assert expected in modclient.ft().explain(q, query_params={"hello": "hello"})
+
+    expected = "NUMERIC {0.000000 <= @num <= 10.000000}\n"
+    assert expected in modclient.ft().explain(Query("@title:(@num:[0 10])").dialect(1))
+    with pytest.raises(redis.ResponseError) as err:
+        modclient.ft().explain(Query("@title:(@num:[0 10])").dialect(2))
+    assert "Syntax error" in str(err)

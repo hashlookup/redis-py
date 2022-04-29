@@ -30,6 +30,8 @@ from redis.asyncio.connection import (
     SSLConnection,
     UnixDomainSocketConnection,
 )
+from redis.asyncio.lock import Lock
+from redis.asyncio.retry import Retry
 from redis.client import (
     EMPTY_RESPONSE,
     NEVER_DECODE,
@@ -39,8 +41,8 @@ from redis.client import (
 )
 from redis.commands import (
     AsyncCoreCommands,
+    AsyncRedisModuleCommands,
     AsyncSentinelCommands,
-    RedisModuleCommands,
     list_or_args,
 )
 from redis.compat import Protocol, TypedDict
@@ -53,8 +55,6 @@ from redis.exceptions import (
     TimeoutError,
     WatchError,
 )
-from redis.lock import Lock
-from redis.retry import Retry
 from redis.typing import ChannelT, EncodableT, KeyT
 from redis.utils import safe_str, str_if_bytes
 
@@ -81,7 +81,7 @@ ResponseCallbackT = Union[ResponseCallbackProtocol, AsyncResponseCallbackProtoco
 
 
 class Redis(
-    AbstractRedis, RedisModuleCommands, AsyncCoreCommands, AsyncSentinelCommands
+    AbstractRedis, AsyncRedisModuleCommands, AsyncCoreCommands, AsyncSentinelCommands
 ):
     """
     Implementation of the Redis protocol.
@@ -254,6 +254,14 @@ class Redis(
     def set_response_callback(self, command: str, callback: ResponseCallbackT):
         """Set a custom Response Callback"""
         self.response_callbacks[command] = callback
+
+    def get_encoder(self):
+        """Get the connection pool's encoder"""
+        return self.connection_pool.get_encoder()
+
+    def get_connection_kwargs(self):
+        """Get the connection's key-word arguments"""
+        return self.connection_pool.connection_kwargs
 
     def load_external_module(
         self,
@@ -485,7 +493,7 @@ class Redis(
         """Parses a response from the Redis server"""
         try:
             if NEVER_DECODE in options:
-                response = await connection.read_response(disable_encoding=True)
+                response = await connection.read_response(disable_decoding=True)
             else:
                 response = await connection.read_response()
         except ResponseError:
