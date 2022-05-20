@@ -120,8 +120,14 @@ class TestRedisCommands:
 
     @skip_if_server_version_lt("7.0.0")
     @skip_if_redis_enterprise()
-    def test_acl_dryrun(self, r):
+    def test_acl_dryrun(self, r, request):
         username = "redis-py-user"
+
+        def teardown():
+            r.acl_deluser(username)
+
+        request.addfinalizer(teardown)
+
         r.acl_setuser(
             username,
             keys=["*"],
@@ -171,7 +177,7 @@ class TestRedisCommands:
         r.acl_genpass(555)
         assert isinstance(password, str)
 
-    @skip_if_server_version_lt("6.0.0")
+    @skip_if_server_version_lt("7.0.0")
     @skip_if_redis_enterprise()
     def test_acl_getuser_setuser(self, r, request):
         username = "redis-py-user"
@@ -217,7 +223,7 @@ class TestRedisCommands:
         assert set(acl["commands"]) == {"+get", "+mget", "-hset"}
         assert acl["enabled"] is True
         assert "on" in acl["flags"]
-        assert set(acl["keys"]) == {b"cache:*", b"objects:*"}
+        assert set(acl["keys"]) == {"~cache:*", "~objects:*"}
         assert len(acl["passwords"]) == 2
 
         # test reset=False keeps existing ACL and applies new ACL on top
@@ -243,7 +249,7 @@ class TestRedisCommands:
         assert set(acl["commands"]) == {"+get", "+mget"}
         assert acl["enabled"] is True
         assert "on" in acl["flags"]
-        assert set(acl["keys"]) == {b"cache:*", b"objects:*"}
+        assert set(acl["keys"]) == {"~cache:*", "~objects:*"}
         assert len(acl["passwords"]) == 2
 
         # test removal of passwords
@@ -277,6 +283,30 @@ class TestRedisCommands:
             username, enabled=True, hashed_passwords=["-" + hashed_password]
         )
         assert len(r.acl_getuser(username)["passwords"]) == 1
+
+        # test selectors
+        assert r.acl_setuser(
+            username,
+            enabled=True,
+            reset=True,
+            passwords=["+pass1", "+pass2"],
+            categories=["+set", "+@hash", "-geo"],
+            commands=["+get", "+mget", "-hset"],
+            keys=["cache:*", "objects:*"],
+            channels=["message:*"],
+            selectors=[("+set", "%W~app*")],
+        )
+        acl = r.acl_getuser(username)
+        assert set(acl["categories"]) == {"-@all", "+@set", "+@hash"}
+        assert set(acl["commands"]) == {"+get", "+mget", "-hset"}
+        assert acl["enabled"] is True
+        assert "on" in acl["flags"]
+        assert set(acl["keys"]) == {"~cache:*", "~objects:*"}
+        assert len(acl["passwords"]) == 2
+        assert set(acl["channels"]) == {"&message:*"}
+        assert acl["selectors"] == [
+            ["commands", "-@all +set", "keys", "%W~app*", "channels", ""]
+        ]
 
     @skip_if_server_version_lt("6.0.0")
     def test_acl_help(self, r):
@@ -1134,7 +1164,7 @@ class TestRedisCommands:
         r.set("key", "val")
         assert r.expire("key", 100, xx=True) == 0
         assert r.expire("key", 100)
-        assert r.expire("key", 500, nx=True) == 1
+        assert r.expire("key", 500, xx=True) == 1
 
     @skip_if_server_version_lt("7.0.0")
     def test_expire_option_gt(self, r):
@@ -2185,20 +2215,21 @@ class TestRedisCommands:
 
     @skip_if_server_version_lt("6.2.0")
     def test_zadd_gt_lt(self, r):
+        r.zadd("a", {"a": 2})
+        assert r.zadd("a", {"a": 5}, gt=True, ch=True) == 1
+        assert r.zadd("a", {"a": 1}, gt=True, ch=True) == 0
+        assert r.zadd("a", {"a": 5}, lt=True, ch=True) == 0
+        assert r.zadd("a", {"a": 1}, lt=True, ch=True) == 1
 
-        for i in range(1, 20):
-            r.zadd("a", {f"a{i}": i})
-        assert r.zadd("a", {"a20": 5}, gt=3) == 1
-
-        for i in range(1, 20):
-            r.zadd("a", {f"a{i}": i})
-        assert r.zadd("a", {"a2": 5}, lt=1) == 0
-
-        # cannot use both nx and xx options
+        # cannot combine both nx and xx options and gt and lt options
         with pytest.raises(exceptions.DataError):
-            r.zadd("a", {"a15": 155}, nx=True, lt=True)
-            r.zadd("a", {"a15": 155}, nx=True, gt=True)
-            r.zadd("a", {"a15": 155}, lt=True, gt=True)
+            r.zadd("a", {"a15": 15}, nx=True, lt=True)
+        with pytest.raises(exceptions.DataError):
+            r.zadd("a", {"a15": 15}, nx=True, gt=True)
+        with pytest.raises(exceptions.DataError):
+            r.zadd("a", {"a15": 15}, lt=True, gt=True)
+        with pytest.raises(exceptions.DataError):
+            r.zadd("a", {"a15": 15}, nx=True, xx=True)
 
     def test_zcard(self, r):
         r.zadd("a", {"a1": 1, "a2": 2, "a3": 3})
@@ -2982,6 +3013,7 @@ class TestRedisCommands:
         assert r.lrange("sorted", 0, 10) == [b"vodka", b"milk", b"gin", b"apple juice"]
 
     @skip_if_server_version_lt("7.0.0")
+    @pytest.mark.onlynoncluster
     def test_sort_ro(self, r):
         r["score:1"] = 8
         r["score:2"] = 3
@@ -4519,6 +4551,16 @@ class TestRedisCommands:
     def test_command_docs(self, r):
         with pytest.raises(NotImplementedError):
             r.command_docs("set")
+
+    @skip_if_server_version_lt("7.0.0")
+    @skip_if_redis_enterprise()
+    def test_command_list(self, r: redis.Redis):
+        assert len(r.command_list()) > 300
+        assert len(r.command_list(module="fakemod")) == 0
+        assert len(r.command_list(category="list")) > 15
+        assert "lpop" in r.command_list(pattern="l*")
+        with pytest.raises(redis.ResponseError):
+            r.command_list(category="list", pattern="l*")
 
     @pytest.mark.onlynoncluster
     @skip_if_server_version_lt("2.8.13")

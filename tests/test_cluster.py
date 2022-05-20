@@ -665,8 +665,8 @@ class TestClusterRedisCommands:
 
     def test_case_insensitive_command_names(self, r):
         assert (
-            r.cluster_response_callbacks["cluster addslots"]
-            == r.cluster_response_callbacks["CLUSTER ADDSLOTS"]
+            r.cluster_response_callbacks["cluster slots"]
+            == r.cluster_response_callbacks["CLUSTER SLOTS"]
         )
 
     def test_get_and_set(self, r):
@@ -856,6 +856,29 @@ class TestClusterRedisCommands:
         assert cluster_slots.get((0, 8191)) is not None
         assert cluster_slots.get((0, 8191)).get("primary") == ("127.0.0.1", 7000)
 
+    @skip_if_server_version_lt("7.0.0")
+    @skip_if_redis_enterprise()
+    def test_cluster_shards(self, r):
+        cluster_shards = r.cluster_shards()
+        assert isinstance(cluster_shards, list)
+        assert isinstance(cluster_shards[0], dict)
+        attributes = [
+            "id",
+            "endpoint",
+            "ip",
+            "hostname",
+            "port",
+            "tls-port",
+            "role",
+            "replication-offset",
+            "health",
+        ]
+        for x in cluster_shards:
+            assert list(x.keys()) == ["slots", "nodes"]
+            for node in x["nodes"]:
+                for attribute in node.keys():
+                    assert attribute in attributes
+
     @skip_if_redis_enterprise()
     def test_cluster_addslots(self, r):
         node = r.get_random_node()
@@ -1038,7 +1061,7 @@ class TestClusterRedisCommands:
 
     @skip_if_redis_enterprise()
     def test_cluster_get_keys_in_slot(self, r):
-        response = [b"{foo}1", b"{foo}2"]
+        response = ["{foo}1", "{foo}2"]
         node = r.nodes_manager.get_node_from_slot(12182)
         mock_node_resp(node, response)
         keys = r.cluster_get_keys_in_slot(12182, 4)
@@ -1098,7 +1121,6 @@ class TestClusterRedisCommands:
         links_to = sum(x.count("to") for x in res)
         links_for = sum(x.count("from") for x in res)
         assert links_to == links_for
-        print(res)
         for i in range(0, len(res) - 1, 2):
             assert res[i][3] == res[i + 1][3]
 

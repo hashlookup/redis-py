@@ -186,9 +186,11 @@ class ACLCommands(CommandsProtocol):
         nopass: bool = False,
         passwords: Union[str, Iterable[str], None] = None,
         hashed_passwords: Union[str, Iterable[str], None] = None,
-        categories: Union[Iterable[str], None] = None,
-        commands: Union[Iterable[str], None] = None,
-        keys: Union[Iterable[KeyT], None] = None,
+        categories: Optional[Iterable[str]] = None,
+        commands: Optional[Iterable[str]] = None,
+        keys: Optional[Iterable[KeyT]] = None,
+        channels: Optional[Iterable[ChannelT]] = None,
+        selectors: Optional[Iterable[Tuple[str, KeyT]]] = None,
         reset: bool = False,
         reset_keys: bool = False,
         reset_passwords: bool = False,
@@ -342,7 +344,29 @@ class ACLCommands(CommandsProtocol):
         if keys:
             for key in keys:
                 key = encoder.encode(key)
-                pieces.append(b"~%s" % key)
+                if not key.startswith(b"%") and not key.startswith(b"~"):
+                    key = b"~%s" % key
+                pieces.append(key)
+
+        if channels:
+            for channel in channels:
+                channel = encoder.encode(channel)
+                pieces.append(b"&%s" % channel)
+
+        if selectors:
+            for cmd, key in selectors:
+                cmd = encoder.encode(cmd)
+                if not cmd.startswith(b"+") and not cmd.startswith(b"-"):
+                    raise DataError(
+                        f'Command "{encoder.decode(cmd, force=True)}" '
+                        'must be prefixed with "+" or "-"'
+                    )
+
+                key = encoder.encode(key)
+                if not key.startswith(b"%") and not key.startswith(b"~"):
+                    key = b"~%s" % key
+
+                pieces.append(b"(%s %s)" % (cmd, key))
 
         return self.execute_command("ACL SETUSER", *pieces, **kwargs)
 
@@ -744,6 +768,34 @@ class ManagementCommands(CommandsProtocol):
 
     def command_count(self, **kwargs) -> ResponseT:
         return self.execute_command("COMMAND COUNT", **kwargs)
+
+    def command_list(
+        self,
+        module: Optional[str] = None,
+        category: Optional[str] = None,
+        pattern: Optional[str] = None,
+    ) -> ResponseT:
+        """
+        Return an array of the server's command names.
+        You can use one of the following filters:
+        ``module``: get the commands that belong to the module
+        ``category``: get the commands in the ACL category
+        ``pattern``: get the commands that match the given pattern
+
+        For more information see https://redis.io/commands/command-list/
+        """
+        pieces = []
+        if module is not None:
+            pieces.extend(["MODULE", module])
+        if category is not None:
+            pieces.extend(["ACLCAT", category])
+        if pattern is not None:
+            pieces.extend(["PATTERN", pattern])
+
+        if pieces:
+            pieces.insert(0, "FILTERBY")
+
+        return self.execute_command("COMMAND LIST", *pieces)
 
     def command_getkeysandflags(self, *args: List[str]) -> List[Union[str, List[str]]]:
         """
@@ -3891,8 +3943,8 @@ class SortedSetCommands(CommandsProtocol):
         xx: bool = False,
         ch: bool = False,
         incr: bool = False,
-        gt: bool = None,
-        lt: bool = None,
+        gt: bool = False,
+        lt: bool = False,
     ) -> ResponseT:
         """
         Set any number of element-name, score pairs to the key ``name``. Pairs
@@ -3931,12 +3983,14 @@ class SortedSetCommands(CommandsProtocol):
             raise DataError("ZADD requires at least one element/score pair")
         if nx and xx:
             raise DataError("ZADD allows either 'nx' or 'xx', not both")
+        if gt and lt:
+            raise DataError("ZADD allows either 'gt' or 'lt', not both")
         if incr and len(mapping) != 1:
             raise DataError(
                 "ZADD option 'incr' only works when passing a "
                 "single element/score pair"
             )
-        if nx is True and (gt is not None or lt is not None):
+        if nx and (gt or lt):
             raise DataError("Only one of 'nx', 'lt', or 'gr' may be defined.")
 
         pieces: list[EncodableT] = []
