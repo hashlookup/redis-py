@@ -3,6 +3,7 @@ import datetime
 import re
 import time
 from string import ascii_letters
+from unittest import mock
 
 import pytest
 
@@ -89,10 +90,7 @@ class TestRedisCommands:
         request.addfinalizer(teardown)
 
         assert r.acl_setuser(
-            username,
-            enabled=True,
-            passwords=["+strong_password"],
-            commands=["+acl"],
+            username, enabled=True, passwords=["+strong_password"], commands=["+acl"]
         )
 
         assert r.auth(username=username, password="strong_password") is True
@@ -128,11 +126,7 @@ class TestRedisCommands:
 
         request.addfinalizer(teardown)
 
-        r.acl_setuser(
-            username,
-            keys=["*"],
-            commands=["+set"],
-        )
+        r.acl_setuser(username, keys=["*"], commands=["+set"])
         assert r.acl_dryrun(username, "set", "key", "value") == b"OK"
         assert r.acl_dryrun(username, "get", "key").startswith(
             b"This user has no permissions to run the"
@@ -677,7 +671,7 @@ class TestRedisCommands:
     @pytest.mark.onlynoncluster
     @skip_if_server_version_lt("7.0.0")
     def test_client_no_evict(self, r):
-        assert r.client_no_evict("ON") == "OK"
+        assert r.client_no_evict("ON")
         with pytest.raises(TypeError):
             r.client_no_evict()
 
@@ -1096,9 +1090,9 @@ class TestRedisCommands:
     @skip_if_server_version_lt("7.0.0")
     def test_lcs(self, r):
         r.mset({"foo": "ohmytext", "bar": "mynewtext"})
-        assert r.lcs("foo", "bar") == "mytext"
+        assert r.lcs("foo", "bar") == b"mytext"
         assert r.lcs("foo", "bar", len=True) == 6
-        result = ["matches", [[[4, 7], [5, 8]]], "len", 6]
+        result = [b"matches", [[[4, 7], [5, 8]]], b"len", 6]
         assert r.lcs("foo", "bar", idx=True, minmatchlen=3) == result
         with pytest.raises(redis.ResponseError):
             assert r.lcs("foo", "bar", len=True, idx=True)
@@ -1771,24 +1765,24 @@ class TestRedisCommands:
     @skip_if_server_version_lt("7.0.0")
     def test_blmpop(self, r):
         r.rpush("a", "1", "2", "3", "4", "5")
-        res = ["a", ["1", "2"]]
+        res = [b"a", [b"1", b"2"]]
         assert r.blmpop(1, "2", "b", "a", direction="LEFT", count=2) == res
         with pytest.raises(TypeError):
             r.blmpop(1, "2", "b", "a", count=2)
         r.rpush("b", "6", "7", "8", "9")
-        assert r.blmpop(0, "2", "b", "a", direction="LEFT") == ["b", ["6"]]
+        assert r.blmpop(0, "2", "b", "a", direction="LEFT") == [b"b", [b"6"]]
         assert r.blmpop(1, "2", "foo", "bar", direction="RIGHT") is None
 
     @pytest.mark.onlynoncluster
     @skip_if_server_version_lt("7.0.0")
     def test_lmpop(self, r):
         r.rpush("foo", "1", "2", "3", "4", "5")
-        result = ["foo", ["1", "2"]]
+        result = [b"foo", [b"1", b"2"]]
         assert r.lmpop("2", "bar", "foo", direction="LEFT", count=2) == result
         with pytest.raises(redis.ResponseError):
             r.lmpop("2", "bar", "foo", direction="up", count=2)
         r.rpush("bar", "a", "b", "c", "d")
-        assert r.lmpop("2", "bar", "foo", direction="LEFT") == ["bar", ["a"]]
+        assert r.lmpop("2", "bar", "foo", direction="LEFT") == [b"bar", [b"a"]]
 
     def test_lindex(self, r):
         r.rpush("a", "1", "2", "3")
@@ -2400,23 +2394,23 @@ class TestRedisCommands:
     @skip_if_server_version_lt("7.0.0")
     def test_zmpop(self, r):
         r.zadd("a", {"a1": 1, "a2": 2, "a3": 3})
-        res = ["a", [["a1", "1"], ["a2", "2"]]]
+        res = [b"a", [[b"a1", b"1"], [b"a2", b"2"]]]
         assert r.zmpop("2", ["b", "a"], min=True, count=2) == res
         with pytest.raises(redis.DataError):
             r.zmpop("2", ["b", "a"], count=2)
         r.zadd("b", {"b1": 10, "ab": 9, "b3": 8})
-        assert r.zmpop("2", ["b", "a"], max=True) == ["b", [["b1", "10"]]]
+        assert r.zmpop("2", ["b", "a"], max=True) == [b"b", [[b"b1", b"10"]]]
 
     @pytest.mark.onlynoncluster
     @skip_if_server_version_lt("7.0.0")
     def test_bzmpop(self, r):
         r.zadd("a", {"a1": 1, "a2": 2, "a3": 3})
-        res = ["a", [["a1", "1"], ["a2", "2"]]]
+        res = [b"a", [[b"a1", b"1"], [b"a2", b"2"]]]
         assert r.bzmpop(1, "2", ["b", "a"], min=True, count=2) == res
         with pytest.raises(redis.DataError):
             r.bzmpop(1, "2", ["b", "a"], count=2)
         r.zadd("b", {"b1": 10, "ab": 9, "b3": 8})
-        res = ["b", [["b1", "10"]]]
+        res = [b"b", [[b"b1", b"10"]]]
         assert r.bzmpop(0, "2", ["b", "a"], max=True) == res
         assert r.bzmpop(1, "2", ["foo", "bar"], max=True) is None
 
@@ -3107,6 +3101,7 @@ class TestRedisCommands:
 
     @pytest.mark.onlynoncluster
     @skip_if_server_version_lt("3.0.0")
+    @skip_if_server_version_gte("7.0.0")
     @skip_if_redis_enterprise()
     def test_readwrite(self, r):
         assert r.readwrite()
@@ -3360,18 +3355,15 @@ class TestRedisCommands:
                 (2.19093829393386841, 41.43379028184083523),
             ]
         ]
-        assert (
-            r.geosearch(
-                "barcelona",
-                longitude=2.191,
-                latitude=41.433,
-                radius=1,
-                unit="km",
-                withdist=True,
-                withcoord=True,
-            )
-            == [[b"place1", 0.0881, (2.19093829393386841, 41.43379028184083523)]]
-        )
+        assert r.geosearch(
+            "barcelona",
+            longitude=2.191,
+            latitude=41.433,
+            radius=1,
+            unit="km",
+            withdist=True,
+            withcoord=True,
+        ) == [[b"place1", 0.0881, (2.19093829393386841, 41.43379028184083523)]]
         assert r.geosearch(
             "barcelona",
             longitude=2.191,
@@ -3701,7 +3693,7 @@ class TestRedisCommands:
     def test_xadd(self, r):
         stream = "stream"
         message_id = r.xadd(stream, {"foo": "bar"})
-        assert re.match(br"[0-9]+\-[0-9]+", message_id)
+        assert re.match(rb"[0-9]+\-[0-9]+", message_id)
 
         # explicit message id
         message_id = b"9999999999999999999-0"
@@ -3847,17 +3839,14 @@ class TestRedisCommands:
 
         # reclaim the message as consumer1, but use the justid argument
         # which only returns message ids
-        assert (
-            r.xclaim(
-                stream,
-                group,
-                consumer1,
-                min_idle_time=0,
-                message_ids=(message_id,),
-                justid=True,
-            )
-            == [message_id]
-        )
+        assert r.xclaim(
+            stream,
+            group,
+            consumer1,
+            min_idle_time=0,
+            message_ids=(message_id,),
+            justid=True,
+        ) == [message_id]
 
     @skip_if_server_version_lt("7.0.0")
     def test_xclaim_trimmed(self, r):
@@ -4228,34 +4217,17 @@ class TestRedisCommands:
         expected = [
             [
                 stream.encode(),
-                [
-                    get_stream_message(r, stream, m1),
-                    get_stream_message(r, stream, m2),
-                ],
+                [get_stream_message(r, stream, m1), get_stream_message(r, stream, m2)],
             ]
         ]
         # xread starting at 0 returns both messages
         assert r.xread(streams={stream: 0}) == expected
 
-        expected = [
-            [
-                stream.encode(),
-                [
-                    get_stream_message(r, stream, m1),
-                ],
-            ]
-        ]
+        expected = [[stream.encode(), [get_stream_message(r, stream, m1)]]]
         # xread starting at 0 and count=1 returns only the first message
         assert r.xread(streams={stream: 0}, count=1) == expected
 
-        expected = [
-            [
-                stream.encode(),
-                [
-                    get_stream_message(r, stream, m2),
-                ],
-            ]
-        ]
+        expected = [[stream.encode(), [get_stream_message(r, stream, m2)]]]
         # xread starting at m1 returns only the second message
         assert r.xread(streams={stream: m1}) == expected
 
@@ -4274,10 +4246,7 @@ class TestRedisCommands:
         expected = [
             [
                 stream.encode(),
-                [
-                    get_stream_message(r, stream, m1),
-                    get_stream_message(r, stream, m2),
-                ],
+                [get_stream_message(r, stream, m1), get_stream_message(r, stream, m2)],
             ]
         ]
         # xread starting at 0 returns both messages
@@ -4286,14 +4255,7 @@ class TestRedisCommands:
         r.xgroup_destroy(stream, group)
         r.xgroup_create(stream, group, 0)
 
-        expected = [
-            [
-                stream.encode(),
-                [
-                    get_stream_message(r, stream, m1),
-                ],
-            ]
-        ]
+        expected = [[stream.encode(), [get_stream_message(r, stream, m1)]]]
         # xread with count=1 returns only the first message
         assert r.xreadgroup(group, consumer, streams={stream: ">"}, count=1) == expected
 
@@ -4320,15 +4282,7 @@ class TestRedisCommands:
         r.xgroup_destroy(stream, group)
         r.xgroup_create(stream, group, "0")
         # delete all the messages in the stream
-        expected = [
-            [
-                stream.encode(),
-                [
-                    (m1, {}),
-                    (m2, {}),
-                ],
-            ]
-        ]
+        expected = [[stream.encode(), [(m1, {}), (m2, {})]]]
         r.xreadgroup(group, consumer, streams={stream: ">"})
         r.xtrim(stream, 0)
         assert r.xreadgroup(group, consumer, streams={stream: "0"}) == expected
@@ -4558,7 +4512,7 @@ class TestRedisCommands:
         assert len(r.command_list()) > 300
         assert len(r.command_list(module="fakemod")) == 0
         assert len(r.command_list(category="list")) > 15
-        assert "lpop" in r.command_list(pattern="l*")
+        assert b"lpop" in r.command_list(pattern="l*")
         with pytest.raises(redis.ResponseError):
             r.command_list(category="list", pattern="l*")
 
@@ -4594,7 +4548,10 @@ class TestRedisCommands:
     @skip_if_server_version_lt("7.0.0")
     @skip_if_redis_enterprise()
     def test_command_getkeysandflags(self, r: redis.Redis):
-        res = [["mylist1", ["RW", "access", "delete"]], ["mylist2", ["RW", "insert"]]]
+        res = [
+            [b"mylist1", [b"RW", b"access", b"delete"]],
+            [b"mylist2", [b"RW", b"insert"]],
+        ]
         assert res == r.command_getkeysandflags(
             "LMOVE", "mylist1", "mylist2", "left", "left"
         )
@@ -4674,6 +4631,19 @@ class TestRedisCommands:
         with pytest.raises(redis.ResponseError):
             assert r.replicaof("NO ONE")
         assert r.replicaof("NO", "ONE")
+
+    def test_shutdown(self, r: redis.Redis):
+        r.execute_command = mock.MagicMock()
+        r.execute_command("SHUTDOWN", "NOSAVE")
+        r.execute_command.assert_called_once_with("SHUTDOWN", "NOSAVE")
+
+    @skip_if_server_version_lt("7.0.0")
+    def test_shutdown_with_params(self, r: redis.Redis):
+        r.execute_command = mock.MagicMock()
+        r.execute_command("SHUTDOWN", "SAVE", "NOW", "FORCE")
+        r.execute_command.assert_called_once_with("SHUTDOWN", "SAVE", "NOW", "FORCE")
+        r.execute_command("SHUTDOWN", "ABORT")
+        r.execute_command.assert_called_with("SHUTDOWN", "ABORT")
 
     @pytest.mark.replica
     @skip_if_server_version_lt("2.8.0")
