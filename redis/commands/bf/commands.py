@@ -49,6 +49,8 @@ TDIGEST_QUANTILE = "TDIGEST.QUANTILE"
 TDIGEST_MIN = "TDIGEST.MIN"
 TDIGEST_MAX = "TDIGEST.MAX"
 TDIGEST_INFO = "TDIGEST.INFO"
+TDIGEST_TRIMMED_MEAN = "TDIGEST.TRIMMED_MEAN"
+TDIGEST_MERGESTORE = "TDIGEST.MERGESTORE"
 
 
 class BFCommands:
@@ -344,7 +346,7 @@ class TOPKCommands:
 
 
 class TDigestCommands:
-    def create(self, key, compression):
+    def create(self, key, compression=100):
         """
         Allocate the memory and initialize the t-digest.
         For more information see `TDIGEST.CREATE <https://redis.io/commands/tdigest.create>`_.
@@ -393,13 +395,14 @@ class TDigestCommands:
         """  # noqa
         return self.execute_command(TDIGEST_MAX, key)
 
-    def quantile(self, key, quantile):
+    def quantile(self, key, quantile, *quantiles):
         """
-        Return double value estimate of the cutoff such that a specified fraction of the data
-        added to this TDigest would be less than or equal to the cutoff.
+        Returns estimates of one or more cutoffs such that a specified fraction of the
+        observations added to this t-digest would be less than or equal to each of the
+        specified cutoffs. (Multiple quantiles can be returned with one call)
         For more information see `TDIGEST.QUANTILE <https://redis.io/commands/tdigest.quantile>`_.
         """  # noqa
-        return self.execute_command(TDIGEST_QUANTILE, key, quantile)
+        return self.execute_command(TDIGEST_QUANTILE, key, quantile, *quantiles)
 
     def cdf(self, key, value):
         """
@@ -415,6 +418,29 @@ class TDigestCommands:
         For more information see `TDIGEST.INFO <https://redis.io/commands/tdigest.info>`_.
         """  # noqa
         return self.execute_command(TDIGEST_INFO, key)
+
+    def trimmed_mean(self, key, low_cut_quantile, high_cut_quantile):
+        """
+        Return mean value from the sketch, excluding observation values outside
+        the low and high cutoff quantiles.
+        For more information see `TDIGEST.TRIMMED_MEAN <https://redis.io/commands/tdigest.trimmed_mean>`_.
+        """  # noqa
+        return self.execute_command(
+            TDIGEST_TRIMMED_MEAN, key, low_cut_quantile, high_cut_quantile
+        )
+
+    def mergestore(self, dest_key, numkeys, *sourcekeys, compression=False):
+        """
+        Merges all of the values from `sourcekeys` keys to `dest_key` sketch.
+        If destination already exists, it is overwritten.
+
+
+        For more information see `TDIGEST.MERGESTORE <https://redis.io/commands/tdigest.mergestore>`_.
+        """  # noqa
+        params = [dest_key, numkeys, *sourcekeys]
+        if compression:
+            params.extend(["COMPRESSION", compression])
+        return self.execute_command(TDIGEST_MERGESTORE, *params)
 
 
 class CMSCommands:

@@ -965,7 +965,7 @@ def test_aggregations_groupby(client):
 
     res = client.ft().aggregate(req).rows[0]
     assert res[1] == "redis"
-    assert res[3] == ["RediSearch", "RedisAI", "RedisJson"]
+    assert set(res[3]) == {"RediSearch", "RedisAI", "RedisJson"}
 
     req = aggregations.AggregateRequest("redis").group_by(
         "@parent", reducers.first_value("@title").alias("first")
@@ -1712,3 +1712,27 @@ def test_expire_while_search(modclient: redis.Redis):
         modclient.ft().search(Query("*")).docs[1]
     time.sleep(1)
     assert 2 == modclient.ft().search(Query("*")).total
+
+
+@pytest.mark.redismod
+@pytest.mark.experimental
+def test_withsuffixtrie(modclient: redis.Redis):
+    # create index
+    assert modclient.ft().create_index((TextField("txt"),))
+    waitForIndex(modclient, getattr(modclient.ft(), "index_name", "idx"))
+    info = modclient.ft().info()
+    assert "WITHSUFFIXTRIE" not in info["attributes"][0]
+    assert modclient.ft().dropindex("idx")
+
+    # create withsuffixtrie index (text fiels)
+    assert modclient.ft().create_index((TextField("t", withsuffixtrie=True)))
+    waitForIndex(modclient, getattr(modclient.ft(), "index_name", "idx"))
+    info = modclient.ft().info()
+    assert "WITHSUFFIXTRIE" in info["attributes"][0]
+    assert modclient.ft().dropindex("idx")
+
+    # create withsuffixtrie index (tag field)
+    assert modclient.ft().create_index((TagField("t", withsuffixtrie=True)))
+    waitForIndex(modclient, getattr(modclient.ft(), "index_name", "idx"))
+    info = modclient.ft().info()
+    assert "WITHSUFFIXTRIE" in info["attributes"][0]
