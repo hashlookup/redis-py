@@ -31,9 +31,8 @@ jobs:
      name: Code linters
      runs-on: ubuntu-latest
      steps:
-       - uses: actions/checkout@v2
-       - name: install python
-         uses: actions/setup-python@v4
+       - uses: actions/checkout@v3
+       - uses: actions/setup-python@v4
          with:
            python-version: 3.9
            cache: 'pip'
@@ -55,9 +54,8 @@ jobs:
        ACTIONS_ALLOW_UNSECURE_COMMANDS: true
      name: Python ${{ matrix.python-version }} ${{matrix.test-type}}-${{matrix.connection-type}} tests
      steps:
-       - uses: actions/checkout@v2
-       - name: install python
-         uses: actions/setup-python@v4
+       - uses: actions/checkout@v3
+       - uses: actions/setup-python@v4
          with:
            python-version: ${{ matrix.python-version }}
            cache: 'pip'
@@ -71,21 +69,20 @@ jobs:
          with:
            name: pytest-results-${{matrix.test-type}}
            path: '${{matrix.test-type}}*results.xml'
-       - name: View Test Results
-         uses: dorny/test-reporter@v1
-         if: success() || failure()
-         with:
-           name: Test Results ${{matrix.python-version}} ${{matrix.test-type}}-${{matrix.connection-type}}
-           path: '${{matrix.test-type}}*results.xml'
-           reporter: java-junit
-           list-suites: failed
-           list-tests: failed
-           max-annotations: 10
        - name: Upload codecov coverage
-         uses: codecov/codecov-action@v2
+         uses: codecov/codecov-action@v3
          with:
            fail_ci_if_error: false
-           token: ${{ secrets.CODECOV_TOKEN }}
+      #  - name: View Test Results
+      #    uses: dorny/test-reporter@v1
+      #    if: success() || failure()
+      #    with:
+      #      name: Test Results ${{matrix.python-version}} ${{matrix.test-type}}-${{matrix.connection-type}}
+      #      path: '${{matrix.test-type}}*results.xml'
+      #      reporter: java-junit
+      #      list-suites: failed
+      #      list-tests: failed
+      #      max-annotations: 10
 
    build_and_test_package:
     name: Validate building and installing the package
@@ -94,9 +91,8 @@ jobs:
       matrix:
         extension: ['tar.gz', 'whl']
     steps:
-      - uses: actions/checkout@v2
-      - name: install python
-        uses: actions/setup-python@v3
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: 3.9
       - name: Run installed unit tests
@@ -110,9 +106,8 @@ jobs:
       matrix:
         python-version: ['3.7', '3.8', '3.9', '3.10', 'pypy-3.7']
     steps:
-      - uses: actions/checkout@v2
-      - name: install python ${{ matrix.python-version }}
-        uses: actions/setup-python@v3
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'

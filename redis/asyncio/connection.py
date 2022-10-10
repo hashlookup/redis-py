@@ -1,7 +1,6 @@
 import asyncio
 import copy
 import enum
-import errno
 import inspect
 import io
 import os
@@ -54,16 +53,6 @@ from redis.utils import HIREDIS_AVAILABLE, str_if_bytes
 hiredis = None
 if HIREDIS_AVAILABLE:
     import hiredis
-
-NONBLOCKING_EXCEPTION_ERROR_NUMBERS = {
-    BlockingIOError: errno.EWOULDBLOCK,
-    ssl.SSLWantReadError: 2,
-    ssl.SSLWantWriteError: 2,
-    ssl.SSLError: 2,
-}
-
-NONBLOCKING_EXCEPTIONS = tuple(NONBLOCKING_EXCEPTION_ERROR_NUMBERS.keys())
-
 
 SYM_STAR = b"*"
 SYM_DOLLAR = b"$"
@@ -208,7 +197,7 @@ class BaseParser:
     def on_connect(self, connection: "Connection"):
         raise NotImplementedError()
 
-    async def can_read(self, timeout: float) -> bool:
+    async def can_read_destructive(self) -> bool:
         raise NotImplementedError()
 
     async def read_response(
@@ -229,11 +218,9 @@ class SocketBuffer:
         self,
         stream_reader: asyncio.StreamReader,
         socket_read_size: int,
-        socket_timeout: Optional[float],
     ):
         self._stream: Optional[asyncio.StreamReader] = stream_reader
         self.socket_read_size = socket_read_size
-        self.socket_timeout = socket_timeout
         self._buffer: Optional[io.BytesIO] = io.BytesIO()
         # number of bytes written to the buffer from the socket
         self.bytes_written = 0
@@ -244,52 +231,35 @@ class SocketBuffer:
     def length(self):
         return self.bytes_written - self.bytes_read
 
-    async def _read_from_socket(
-        self,
-        length: Optional[int] = None,
-        timeout: Union[float, None, _Sentinel] = SENTINEL,
-        raise_on_timeout: bool = True,
-    ) -> bool:
+    async def _read_from_socket(self, length: Optional[int] = None) -> bool:
         buf = self._buffer
         if buf is None or self._stream is None:
             raise RedisError("Buffer is closed.")
         buf.seek(self.bytes_written)
         marker = 0
-        timeout = timeout if timeout is not SENTINEL else self.socket_timeout
 
+        while True:
+            data = await self._stream.read(self.socket_read_size)
+            # an empty string indicates the server shutdown the socket
+            if isinstance(data, bytes) and len(data) == 0:
+                raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
+            buf.write(data)
+            data_length = len(data)
+            self.bytes_written += data_length
+            marker += data_length
+
+            if length is not None and length > marker:
+                continue
+            return True
+
+    async def can_read_destructive(self) -> bool:
+        if self.length:
+            return True
         try:
-            while True:
-                async with async_timeout.timeout(timeout):
-                    data = await self._stream.read(self.socket_read_size)
-                # an empty string indicates the server shutdown the socket
-                if isinstance(data, bytes) and len(data) == 0:
-                    raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
-                buf.write(data)
-                data_length = len(data)
-                self.bytes_written += data_length
-                marker += data_length
-
-                if length is not None and length > marker:
-                    continue
-                return True
-        except (socket.timeout, asyncio.TimeoutError):
-            if raise_on_timeout:
-                raise TimeoutError("Timeout reading from socket")
+            async with async_timeout.timeout(0):
+                return await self._read_from_socket()
+        except asyncio.TimeoutError:
             return False
-        except NONBLOCKING_EXCEPTIONS as ex:
-            # if we're in nonblocking mode and the recv raises a
-            # blocking error, simply return False indicating that
-            # there's no data to be read. otherwise raise the
-            # original exception.
-            allowed = NONBLOCKING_EXCEPTION_ERROR_NUMBERS.get(ex.__class__, -1)
-            if not raise_on_timeout and ex.errno == allowed:
-                return False
-            raise ConnectionError(f"Error while reading from socket: {ex.args}")
-
-    async def can_read(self, timeout: float) -> bool:
-        return bool(self.length) or await self._read_from_socket(
-            timeout=timeout, raise_on_timeout=False
-        )
 
     async def read(self, length: int) -> bytes:
         length = length + 2  # make sure to read the \r\n terminator
@@ -372,9 +342,7 @@ class PythonParser(BaseParser):
         if self._stream is None:
             raise RedisError("Buffer is closed.")
 
-        self._buffer = SocketBuffer(
-            self._stream, self._read_size, connection.socket_timeout
-        )
+        self._buffer = SocketBuffer(self._stream, self._read_size)
         self.encoder = connection.encoder
 
     def on_disconnect(self):
@@ -386,8 +354,8 @@ class PythonParser(BaseParser):
             self._buffer = None
         self.encoder = None
 
-    async def can_read(self, timeout: float):
-        return self._buffer and bool(await self._buffer.can_read(timeout))
+    async def can_read_destructive(self):
+        return self._buffer and bool(await self._buffer.can_read_destructive())
 
     async def read_response(
         self, disable_decoding: bool = False
@@ -444,16 +412,13 @@ class PythonParser(BaseParser):
 class HiredisParser(BaseParser):
     """Parser class for connections using Hiredis"""
 
-    __slots__ = BaseParser.__slots__ + ("_next_response", "_reader", "_socket_timeout")
-
-    _next_response: bool
+    __slots__ = BaseParser.__slots__ + ("_reader",)
 
     def __init__(self, socket_read_size: int):
         if not HIREDIS_AVAILABLE:
             raise RedisError("Hiredis is not available.")
         super().__init__(socket_read_size=socket_read_size)
         self._reader: Optional[hiredis.Reader] = None
-        self._socket_timeout: Optional[float] = None
 
     def on_connect(self, connection: "Connection"):
         self._stream = connection._reader
@@ -466,57 +431,30 @@ class HiredisParser(BaseParser):
             kwargs["errors"] = connection.encoder.encoding_errors
 
         self._reader = hiredis.Reader(**kwargs)
-        self._next_response = False
-        self._socket_timeout = connection.socket_timeout
 
     def on_disconnect(self):
         self._stream = None
         self._reader = None
-        self._next_response = False
 
-    async def can_read(self, timeout: float):
+    async def can_read_destructive(self):
         if not self._stream or not self._reader:
             raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
-
-        if self._next_response is False:
-            self._next_response = self._reader.gets()
-        if self._next_response is False:
-            return await self.read_from_socket(timeout=timeout, raise_on_timeout=False)
-        return True
-
-    async def read_from_socket(
-        self,
-        timeout: Union[float, None, _Sentinel] = SENTINEL,
-        raise_on_timeout: bool = True,
-    ):
-        timeout = self._socket_timeout if timeout is SENTINEL else timeout
-        try:
-            if timeout is None:
-                buffer = await self._stream.read(self._read_size)
-            else:
-                async with async_timeout.timeout(timeout):
-                    buffer = await self._stream.read(self._read_size)
-            if not buffer or not isinstance(buffer, bytes):
-                raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR) from None
-            self._reader.feed(buffer)
-            # data was read from the socket and added to the buffer.
-            # return True to indicate that data was read.
+        if self._reader.gets():
             return True
-        except asyncio.CancelledError:
-            raise
-        except (socket.timeout, asyncio.TimeoutError):
-            if raise_on_timeout:
-                raise TimeoutError("Timeout reading from socket") from None
+        try:
+            async with async_timeout.timeout(0):
+                return await self.read_from_socket()
+        except asyncio.TimeoutError:
             return False
-        except NONBLOCKING_EXCEPTIONS as ex:
-            # if we're in nonblocking mode and the recv raises a
-            # blocking error, simply return False indicating that
-            # there's no data to be read. otherwise raise the
-            # original exception.
-            allowed = NONBLOCKING_EXCEPTION_ERROR_NUMBERS.get(ex.__class__, -1)
-            if not raise_on_timeout and ex.errno == allowed:
-                return False
-            raise ConnectionError(f"Error while reading from socket: {ex.args}")
+
+    async def read_from_socket(self):
+        buffer = await self._stream.read(self._read_size)
+        if not buffer or not isinstance(buffer, bytes):
+            raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR) from None
+        self._reader.feed(buffer)
+        # data was read from the socket and added to the buffer.
+        # return True to indicate that data was read.
+        return True
 
     async def read_response(
         self, disable_decoding: bool = False
@@ -524,12 +462,6 @@ class HiredisParser(BaseParser):
         if not self._stream or not self._reader:
             self.on_disconnect()
             raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR) from None
-
-        # _next_response might be cached from a can_read() call
-        if self._next_response is not False:
-            response = self._next_response
-            self._next_response = False
-            return response
 
         response = self._reader.gets()
         while response is False:
@@ -671,7 +603,6 @@ class Connection:
         self.set_parser(parser_class)
         self._connect_callbacks: List[weakref.WeakMethod[ConnectCallbackT]] = []
         self._buffer_cutoff = 6000
-        self._lock = asyncio.Lock()
 
     def __repr__(self):
         repr_args = ",".join((f"{k}={v}" for k, v in self.repr_pieces()))
@@ -722,7 +653,7 @@ class Connection:
                 lambda: self._connect(), lambda error: self.disconnect()
             )
         except asyncio.CancelledError:
-            raise
+            raise  # in 3.7 and earlier, this is an Exception, not BaseException
         except (socket.timeout, asyncio.TimeoutError):
             raise TimeoutError("Timeout connecting to server")
         except OSError as e:
@@ -839,7 +770,7 @@ class Connection:
             if str_if_bytes(await self.read_response()) != "OK":
                 raise ConnectionError("Invalid Database")
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, nowait: bool = False) -> None:
         """Disconnects from the Redis server"""
         try:
             async with async_timeout.timeout(self.socket_connect_timeout):
@@ -849,8 +780,9 @@ class Connection:
                 try:
                     if os.getpid() == self.pid:
                         self._writer.close()  # type: ignore[union-attr]
-                        # py3.6 doesn't have this method
-                        if hasattr(self._writer, "wait_closed"):
+                        # wait for close to finish, except when handling errors and
+                        # forcefully disconnecting.
+                        if not nowait:
                             await self._writer.wait_closed()  # type: ignore[union-attr]
                 except OSError:
                     pass
@@ -905,10 +837,10 @@ class Connection:
                 self._writer.writelines(command)
                 await self._writer.drain()
         except asyncio.TimeoutError:
-            await self.disconnect()
+            await self.disconnect(nowait=True)
             raise TimeoutError("Timeout writing to socket") from None
         except OSError as e:
-            await self.disconnect()
+            await self.disconnect(nowait=True)
             if len(e.args) == 1:
                 err_no, errmsg = "UNKNOWN", e.args[0]
             else:
@@ -917,8 +849,8 @@ class Connection:
             raise ConnectionError(
                 f"Error {err_no} while writing to socket. {errmsg}."
             ) from e
-        except BaseException:
-            await self.disconnect()
+        except Exception:
+            await self.disconnect(nowait=True)
             raise
 
     async def send_command(self, *args: Any, **kwargs: Any) -> None:
@@ -927,56 +859,26 @@ class Connection:
             self.pack_command(*args), check_health=kwargs.get("check_health", True)
         )
 
-    async def can_read(self, timeout: float = 0):
+    async def can_read_destructive(self):
         """Poll the socket to see if there's data that can be read."""
-        if not self.is_connected:
-            await self.connect()
         try:
-            return await self._parser.can_read(timeout)
+            return await self._parser.can_read_destructive()
         except OSError as e:
-            await self.disconnect()
+            await self.disconnect(nowait=True)
             raise ConnectionError(
                 f"Error while reading from {self.host}:{self.port}: {e.args}"
             )
 
-    async def read_response(self, disable_decoding: bool = False):
+    async def read_response(
+        self,
+        disable_decoding: bool = False,
+        timeout: Optional[float] = None,
+    ):
         """Read the response from a previously sent command"""
+        read_timeout = timeout if timeout is not None else self.socket_timeout
         try:
-            async with self._lock:
-                if self.socket_timeout:
-                    async with async_timeout.timeout(self.socket_timeout):
-                        response = await self._parser.read_response(
-                            disable_decoding=disable_decoding
-                        )
-                else:
-                    response = await self._parser.read_response(
-                        disable_decoding=disable_decoding
-                    )
-        except asyncio.TimeoutError:
-            await self.disconnect()
-            raise TimeoutError(f"Timeout reading from {self.host}:{self.port}")
-        except OSError as e:
-            await self.disconnect()
-            raise ConnectionError(
-                f"Error while reading from {self.host}:{self.port} : {e.args}"
-            )
-        except BaseException:
-            await self.disconnect()
-            raise
-
-        if self.health_check_interval:
-            next_time = asyncio.get_running_loop().time() + self.health_check_interval
-            self.next_health_check = next_time
-
-        if isinstance(response, ResponseError):
-            raise response from None
-        return response
-
-    async def read_response_without_lock(self, disable_decoding: bool = False):
-        """Read the response from a previously sent command"""
-        try:
-            if self.socket_timeout:
-                async with async_timeout.timeout(self.socket_timeout):
+            if read_timeout is not None:
+                async with async_timeout.timeout(read_timeout):
                     response = await self._parser.read_response(
                         disable_decoding=disable_decoding
                     )
@@ -985,15 +887,23 @@ class Connection:
                     disable_decoding=disable_decoding
                 )
         except asyncio.TimeoutError:
-            await self.disconnect()
+            if timeout is not None:
+                # user requested timeout, return None
+                return None
+            # it was a self.socket_timeout error.
+            await self.disconnect(nowait=True)
             raise TimeoutError(f"Timeout reading from {self.host}:{self.port}")
         except OSError as e:
-            await self.disconnect()
+            await self.disconnect(nowait=True)
             raise ConnectionError(
                 f"Error while reading from {self.host}:{self.port} : {e.args}"
             )
-        except BaseException:
-            await self.disconnect()
+        except asyncio.CancelledError:
+            # need this check for 3.7, where CancelledError
+            # is subclass of Exception, not BaseException
+            raise
+        except Exception:
+            await self.disconnect(nowait=True)
             raise
 
         if self.health_check_interval:
@@ -1241,7 +1151,6 @@ class UnixDomainSocketConnection(Connection):  # lgtm [py/missing-call-to-init]
         self.set_parser(parser_class)
         self._connect_callbacks = []
         self._buffer_cutoff = 6000
-        self._lock = asyncio.Lock()
 
     def repr_pieces(self) -> Iterable[Tuple[str, Union[str, int]]]:
         pieces = [("path", self.path), ("db", self.db)]
@@ -1534,12 +1443,12 @@ class ConnectionPool:
             # pool before all data has been read or the socket has been
             # closed. either way, reconnect and verify everything is good.
             try:
-                if await connection.can_read():
+                if await connection.can_read_destructive():
                     raise ConnectionError("Connection has data") from None
             except ConnectionError:
                 await connection.disconnect()
                 await connection.connect()
-                if await connection.can_read():
+                if await connection.can_read_destructive():
                     raise ConnectionError("Connection not ready") from None
         except BaseException:
             # release the connection back to the pool so that we don't
@@ -1735,12 +1644,12 @@ class BlockingConnectionPool(ConnectionPool):
             # pool before all data has been read or the socket has been
             # closed. either way, reconnect and verify everything is good.
             try:
-                if await connection.can_read():
+                if await connection.can_read_destructive():
                     raise ConnectionError("Connection has data") from None
             except ConnectionError:
                 await connection.disconnect()
                 await connection.connect()
-                if await connection.can_read():
+                if await connection.can_read_destructive():
                     raise ConnectionError("Connection not ready") from None
         except BaseException:
             # release the connection back to the pool so that we don't leak it
