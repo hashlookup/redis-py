@@ -253,6 +253,11 @@ class Redis(
 
         self.response_callbacks = CaseInsensitiveDict(self.__class__.RESPONSE_CALLBACKS)
 
+        # If using a single connection client, we need to lock creation-of and use-of
+        # the client in order to avoid race conditions such as using asyncio.gather
+        # on a set of redis commands
+        self._single_conn_lock = asyncio.Lock()
+
     def __repr__(self):
         return f"{self.__class__.__name__}<{self.connection_pool!r}>"
 
@@ -260,8 +265,10 @@ class Redis(
         return self.initialize().__await__()
 
     async def initialize(self: _RedisT) -> _RedisT:
-        if self.single_connection_client and self.connection is None:
-            self.connection = await self.connection_pool.get_connection("_")
+        if self.single_connection_client:
+            async with self._single_conn_lock:
+                if self.connection is None:
+                    self.connection = await self.connection_pool.get_connection("_")
         return self
 
     def set_response_callback(self, command: str, callback: ResponseCallbackT):
@@ -453,7 +460,7 @@ class Redis(
                 f"Unclosed client session {self!r}", ResourceWarning, source=self
             )
             context = {"client": self, "message": self._DEL_MESSAGE}
-            asyncio.get_event_loop().call_exception_handler(context)
+            asyncio.get_running_loop().call_exception_handler(context)
 
     async def close(self, close_connection_pool: Optional[bool] = None) -> None:
         """
@@ -483,8 +490,8 @@ class Redis(
     async def _disconnect_raise(self, conn: Connection, error: Exception):
         """
         Close the connection and raise an exception
-        if retry_on_timeout is not set or the error
-        is not a TimeoutError
+        if retry_on_error is not set or the error
+        is not one of the specified error types
         """
         await conn.disconnect()
         if (
@@ -501,6 +508,8 @@ class Redis(
         command_name = args[0]
         conn = self.connection or await pool.get_connection(command_name, **options)
 
+        if self.single_connection_client:
+            await self._single_conn_lock.acquire()
         try:
             return await conn.retry.call_with_retry(
                 lambda: self._send_command_parse_response(
@@ -509,6 +518,8 @@ class Redis(
                 lambda error: self._disconnect_raise(conn, error),
             )
         finally:
+            if self.single_connection_client:
+                self._single_conn_lock.release()
             if not self.connection:
                 await pool.release(conn)
 
@@ -798,7 +809,7 @@ class PubSub:
 
         if (
             conn.health_check_interval
-            and asyncio.get_event_loop().time() > conn.next_health_check
+            and asyncio.get_running_loop().time() > conn.next_health_check
         ):
             await conn.send_command(
                 "PING", self.HEALTH_CHECK_MESSAGE, check_health=False

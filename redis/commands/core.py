@@ -2265,6 +2265,8 @@ class BasicKeyCommands(CommandsProtocol):
                 pieces.append(int(ex.total_seconds()))
             elif isinstance(ex, int):
                 pieces.append(ex)
+            elif isinstance(ex, str) and ex.isdigit():
+                pieces.append(int(ex))
             else:
                 raise DataError("ex must be datetime.timedelta or int")
         if px is not None:
@@ -3549,7 +3551,7 @@ class StreamCommands(CommandsProtocol):
         groupname: GroupT,
         consumername: ConsumerT,
         min_idle_time: int,
-        message_ids: [List[StreamIdT], Tuple[StreamIdT]],
+        message_ids: Union[List[StreamIdT], Tuple[StreamIdT]],
         idle: Union[int, None] = None,
         time: Union[int, None] = None,
         retrycount: Union[int, None] = None,
